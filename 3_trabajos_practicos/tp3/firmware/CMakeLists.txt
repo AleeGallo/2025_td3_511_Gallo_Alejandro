@@ -61,6 +61,7 @@
             pico_stdlib
             freertos
             hardware_gpio
+            hardware_i2c
             lcd
             helper
             )
