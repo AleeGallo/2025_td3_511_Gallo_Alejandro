@@ -120,7 +120,7 @@ int main()
     xTaskCreate(task_init, "Init", configMINIMAL_STACK_SIZE, NULL, 3, NULL);
     xTaskCreate(task_print, "Print", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     //xTaskCreate(task_polling, "Polling", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-
+    
     // Arranca el scheduler
     vTaskStartScheduler();
     while(1);
