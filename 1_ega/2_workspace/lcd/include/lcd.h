@@ -44,8 +44,8 @@
 #define LCD_COMMAND    0
 
 // Dimensiones del display
-#define MAX_LINES      2
-#define MAX_CHARS      16
+#define MAX_LINES      4
+#define MAX_CHARS      20
 
 // Prototipos de funciones
 void lcd_clear(void);
