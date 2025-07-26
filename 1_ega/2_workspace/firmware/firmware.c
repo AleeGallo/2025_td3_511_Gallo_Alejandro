@@ -7,8 +7,9 @@
 #include "task.h"
 #include "queue.h"
 #include "semphr.h"
-#include "rtc.h"   // Librería del RTC DS3231
-#include "lcd.h"  // Librería del LCD 4x20
+
+// #include "rtc.h"   // Librería del RTC DS3231
+// #include "lcd.h"  // Librería del LCD 4x20
 
 // Semáforos
 SemaphoreHandle_t sem_bin_config;   // Semaforo para la configuracion
@@ -67,7 +68,7 @@ void vTask_Program_Init(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-
+/*
 void vTask_EEPROM_RTC(void *pvParameters) 
 {
     int setpoints[4];
@@ -135,3 +136,5 @@ void vTask_LCD(void *pvParameters)
         }
     }
 }
+
+*/
