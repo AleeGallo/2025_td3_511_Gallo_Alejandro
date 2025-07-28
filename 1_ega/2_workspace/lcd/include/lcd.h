@@ -53,5 +53,8 @@ void lcd_set_cursor(int line, int position);
 void lcd_char(char val);
 void lcd_string(const char *s);
 void lcd_init(i2c_inst_t *i2c, uint8_t address);
+void lcd_cursor_on(void);
+void lcd_cursor_blink_on(void);
+void lcd_cursor_off(void);
 
 #endif

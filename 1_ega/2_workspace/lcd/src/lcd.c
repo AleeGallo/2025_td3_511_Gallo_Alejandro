@@ -53,8 +53,8 @@ void lcd_clear(void) {
 
 /**
  * @brief Pone al cursor del LCD en la posicion indicada
- * @param line es el numero de linea (0 o 1)
- * @param position es el numero de caracter (0 a 15)
+ * @param line es el numero de linea (0 o 3)
+ * @param position es el numero de caracter (0 a 19)
 */
 void lcd_set_cursor(int line, int position) {
     int line_offsets[] = { 0x00, 0x40, 0x14, 0x54 };
@@ -80,6 +80,18 @@ void lcd_string(const char *s) {
     }
 }
 
+void lcd_cursor_on(void) {
+    lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON | LCD_CURSORON, LCD_COMMAND);
+}
+
+void lcd_cursor_blink_on(void) {
+    lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON | LCD_CURSORON | LCD_BLINKON, LCD_COMMAND);
+}
+
+void lcd_cursor_off(void) {
+    lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON, LCD_COMMAND);
+}
+
 /**
  * @brief Inicializa el display
  * @param i2c puntero a I2C usado (i2c0 o i2c1)
@@ -98,6 +110,6 @@ void lcd_init(i2c_inst_t *i2c, uint8_t address) {
 
     lcd_send_byte(LCD_ENTRYMODESET | LCD_ENTRYLEFT, LCD_COMMAND);
     lcd_send_byte(LCD_FUNCTIONSET | LCD_2LINE, LCD_COMMAND);
-    lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON, LCD_COMMAND);
+    lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON | LCD_CURSORON | LCD_BLINKON, LCD_COMMAND);    // Para mostrar el cursor y hacer parpadear
     lcd_clear();
 }
