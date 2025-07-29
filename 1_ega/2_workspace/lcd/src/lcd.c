@@ -1,5 +1,6 @@
 #include "lcd.h"
 
+#define DELAY_US 600
 // Puntero a I2C usado
 static i2c_inst_t *lcd_i2c;
 // Direccion de 7 bits del I2C
@@ -20,7 +21,6 @@ static void i2c_write_byte(uint8_t val) {
 static void lcd_toggle_enable(uint8_t val) {
     // Toggle enable pin on LCD display
     // We cannot do this too quickly or things don't work
-#define DELAY_US 600
     sleep_us(DELAY_US);
     i2c_write_byte(val | LCD_ENABLE_BIT);
     sleep_us(DELAY_US);
@@ -91,6 +91,28 @@ void lcd_cursor_blink_on(void) {
 void lcd_cursor_off(void) {
     lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON, LCD_COMMAND);
 }
+
+void lcd_show_cursor(bool visible, bool blink) {
+    uint8_t cmd = LCD_DISPLAYCONTROL | LCD_DISPLAYON;
+    if (visible) {
+        cmd |= LCD_CURSORON;
+        if (blink) cmd |= LCD_BLINKON;
+    }
+    lcd_send_byte(cmd, LCD_COMMAND);
+}
+
+void lcd_create_char(uint8_t location, uint8_t charmap[]) {
+    location &= 0x07;  // Solo se permiten ubicaciones 0–7
+    lcd_send_byte(LCD_SETCGRAMADDR | (location << 3), LCD_COMMAND);
+    for (int i = 0; i < 8; i++) {
+        lcd_char(charmap[i]);
+    }
+}
+
+void lcd_put_custom_char(uint8_t location) {
+    lcd_char(location);
+}
+
 
 /**
  * @brief Inicializa el display

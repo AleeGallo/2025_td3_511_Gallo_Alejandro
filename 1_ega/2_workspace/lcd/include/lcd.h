@@ -56,5 +56,8 @@ void lcd_init(i2c_inst_t *i2c, uint8_t address);
 void lcd_cursor_on(void);
 void lcd_cursor_blink_on(void);
 void lcd_cursor_off(void);
+void lcd_show_cursor(bool visible, bool blink);
+void lcd_create_char(uint8_t location, uint8_t charmap[]);
+void lcd_put_custom_char(uint8_t location);
 
 #endif
