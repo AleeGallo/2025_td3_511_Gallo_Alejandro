@@ -9,6 +9,8 @@
 #include "queue.h"
 #include "semphr.h"
 #include "lcd.h"
+//#include "eeprom.h"
+
 
 /* ----------------- CONSTANTES ---------------- */
 
@@ -21,7 +23,8 @@
 #define PIN_ENC_DT  11      // GP11 (pin 15 físico)
 #define PIN_ENC_SW  10      // GP10 (pin 14 físico)
 #define LCD_DIR 0x27
-
+#define RTC_DIR 0x68
+#define EEPROM_DIR 0x57
 
 #define DEBOUNCE_US 7000    // Tiempo antirrebote en microsegundos
 
@@ -38,6 +41,14 @@ typedef struct {
     char textoLCD[4][20];
 } lcd_data_t;
 
+
+// REVISAR
+typedef struct {
+    int resistencia_valor[10]; // Valores de las 10 resistencias
+    float V_max;               // Tensión máxima
+    float I_max;               // Corriente máxima
+} setpoint_data_t;
+
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
 QueueHandle_t Queue_EscribirLCD;
@@ -45,7 +56,7 @@ QueueHandle_t Queue_Setpoints;
 QueueHandle_t Queue_ADC_Sensado;
 SemaphoreHandle_t Sem_Bin_Select_Mas, Sem_Bin_Select_Menos, Sem_Bin_OK;     // Tiene que ser externo?
 SemaphoreHandle_t Sem_Bin_Config, Sem_Bin_Memory;                           // Tiene que ser externo?
-
+SemaphoreHandle_t Sem_I2C0_Mutex;
 
 /*------------- INTERRUPCIONES  -------------*/
 
@@ -111,37 +122,64 @@ void task_LCD (void *params) {
 }
 
 void task_Config(void *params) {
-    char linea1[20];
-    char linea2[20];
+    char linea_aux[4][20];
     lcd_data_t lcd_buffer;
     int resistencia_idx = 0;       // de 0 a 9 (RESISTENCIA 1 a 10)
+    int V_max_mV = 0;              // Vmax en decenas de milivoltios (ej: 123 = 12.3V)
+    int I_max_mA = 0;
     int valores[10] = {0};         // cada resistencia tiene un valor (6 dígitos)
     int digit_selected = 0;        // índice del dígito actual (0 = unidades, 5 = centenas de mil)
     const int potencias[7] = {1, 10, 100, 1000, 10000, 100000, 1000000};
+    const int potencias_V[2] = {1, 10}; // para incrementar en 0.1 V y 1 V (en decenas de mV)
+    const int potencias_I[3] = {1, 10, 100};
 
+    int pantalla_actual = 0;       // 0 = Vmax, 1 = Imax, 2–11 = resistencias 1–10
+    int last_digit_selected = -1;
     TickType_t last_press_time = 0;
     bool pressed = false;
-    int last_digit_selected = -1;
-
     TickType_t last_cursor_time = 0;
     bool cursor_visible = false;
 
     while (1) {
-        // ==============================
-        // Armo la línea 1: nombre
-        snprintf(linea1, sizeof(linea1), "RESISTENCIA %2d", resistencia_idx + 1);
+        
+        int res_idx = pantalla_actual - 2;  // numero de resistencia a guardar
 
-        // Armo la línea 2: valor con formato
-        char valor_str[13];  // 7 dígitos + null
-        sprintf(valor_str, "%07d  OHM", valores[resistencia_idx]);
-        strncpy(linea2, valor_str, 12);
-        linea2[12] = '\0';
+        // --- Lógica de armado de pantallas ---
+         switch (pantalla_actual) {
+            case 0:
+                // Formateo manual V_max_mV a "XX.X V"
+                int entero = V_max_mV / 10;
+                int decimal = V_max_mV % 10;
+                snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG TENSION MAX");
+                snprintf(linea_aux[1], sizeof(linea_aux[1]), "%2d.%1d V", entero, decimal);
+                linea_aux[2][0] = '\0';
+                linea_aux[3][0] = '\0';
+                break;
 
+            case 1:
+                snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG CORRIENTE MAX");
+                //snprintf(linea_aux[1], sizeof(linea_aux[1]), "I MAX: %3d mA", I_max_mA);
+                snprintf(linea_aux[1], sizeof(linea_aux[1]), "%03d mA", I_max_mA);
+                linea_aux[2][0] = '\0';
+                linea_aux[3][0] = '\0';
+                //snprintf(linea_aux[3], sizeof(linea_aux[3]), "PULSAR PARA OK");
+                break;
+
+            default:
+                snprintf(linea_aux[0], sizeof(linea_aux[0]), "RESISTENCIA %2d", res_idx + 1);
+                snprintf(linea_aux[1], sizeof(linea_aux[1]), "%07d  OHM", valores[res_idx]);
+                linea_aux[2][0] = '\0';
+                linea_aux[3][0] = '\0';
+                break;
+        }
+        
+        
+        
         // Copio todo a la estructura de LCD
-        snprintf(lcd_buffer.textoLCD[0], 20, "%-20s", linea1);
-        snprintf(lcd_buffer.textoLCD[1], 20, "%-20s", linea2);
-        lcd_buffer.textoLCD[2][0] = '\0';
-        lcd_buffer.textoLCD[3][0] = '\0';
+        for (int i=0;i<4;i++){
+            snprintf(lcd_buffer.textoLCD[i], 20, "%-20s", linea_aux[i]);
+        }
+    
         // Envío estructura con las 2 primeras líneas
         xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
 
@@ -150,31 +188,60 @@ void task_Config(void *params) {
         lcd_set_cursor(1, ohm_col);
         lcd_put_custom_char(0);  // Muestra símbolo Ω */
 
+
         // 👉 Mover cursor físico al dígito seleccionado solo si cambió
         if (digit_selected != last_digit_selected) {
-            int col = 6 - digit_selected; // de derecha a izquierda
-            lcd_set_cursor(1, col);
+            int col = 0;
+            int row = 1;
+
+            if (pantalla_actual == 0) // Vmax: XX.X
+                col = 3 - 2 * digit_selected;  // 0 = décima, 2 = unidad
+            else if (pantalla_actual == 1) // Imax: XXX
+                col = 2 - digit_selected;  // 0 = unidades, 2 = centenares
+            else
+                col = 6 - digit_selected;  // Resistencia: 7 dígitos, de derecha a izquierda
+
+            lcd_set_cursor(row, col);
             lcd_show_cursor(true, true);
             cursor_visible = true;
             last_cursor_time = xTaskGetTickCount();
             last_digit_selected = digit_selected;
+            
         }
 
         // ==============================
         // ▶ Giro horario = incrementar
         if (xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE) {
-            int factor = potencias[digit_selected];
-            valores[resistencia_idx] += factor;
-            if (valores[resistencia_idx] > 9999999)
-                valores[resistencia_idx] = 9999999;
+            if (pantalla_actual == 0) {
+                int factor = potencias_V[digit_selected];
+                V_max_mV += factor;
+                if (V_max_mV > 120) V_max_mV = 120; // max 12.0 V  
+            } else if (pantalla_actual == 1) {
+                int factor = potencias_I[digit_selected];
+                I_max_mA += factor;
+                if (I_max_mA > 250) I_max_mA = 250;
+            } else {
+                int factor = potencias[digit_selected];
+                valores[res_idx] += factor;
+                if (valores[res_idx] > 9999999) valores[res_idx] = 9999999;
+            }
         }
 
         // ◀ Giro antihorario = decrementar
         if (xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE) {
-            int factor = potencias[digit_selected];
-            valores[resistencia_idx] -= factor;
-            if (valores[resistencia_idx] < 0)
-                valores[resistencia_idx] = 0;
+            if (pantalla_actual == 0) {
+                int factor = potencias_V[digit_selected];
+                V_max_mV -= factor;
+                if (V_max_mV < 0) V_max_mV = 0;
+            } else if (pantalla_actual == 1) {
+                int factor = potencias_I[digit_selected];
+                I_max_mA -= factor;
+                if (I_max_mA < 0) I_max_mA = 0;
+            } else {
+                int factor = potencias[digit_selected];
+                valores[res_idx] -= factor;
+                if (valores[res_idx] < 0) valores[res_idx] = 0;
+            }
         }
 
         // ==============================
@@ -189,11 +256,23 @@ void task_Config(void *params) {
             TickType_t elapsed = xTaskGetTickCount() - last_press_time;
 
             if (elapsed >= pdMS_TO_TICKS(1000)) {
-                resistencia_idx = (resistencia_idx + 1) % 10;
+                pantalla_actual = (pantalla_actual + 1) % 12;
                 digit_selected = 0;
             } else if (elapsed >= pdMS_TO_TICKS(100)) {
-                digit_selected = (digit_selected + 1) % 6;
+                if (pantalla_actual == 0)      digit_selected = (digit_selected + 1) % 2;
+                else if (pantalla_actual == 1) digit_selected = (digit_selected + 1) % 3;
+                else                           digit_selected = (digit_selected + 1) % 7;
             }
+        }
+
+
+        if (pantalla_actual == 11 && pressed && (xTaskGetTickCount() - last_press_time >= pdMS_TO_TICKS(1000))) {
+            setpoint_data_t data;
+            memcpy(data.resistencia_valor, valores, sizeof(valores));
+            data.V_max = V_max_mV / 10.0f;   // Convertir a float para enviar
+            data.I_max = I_max_mA / 1000.0f;
+
+            xQueueSend(Queue_Setpoints, &data, portMAX_DELAY);
         }
 
         /* if (cursor_visible && (xTaskGetTickCount() - last_cursor_time > pdMS_TO_TICKS(2000))) {
@@ -205,12 +284,48 @@ void task_Config(void *params) {
     }
 }
 
+void task_EEPROM_RTC(void *params) {
+    setpoint_data_t received_data;
+    lcd_data_t lcd_buffer;
+    static bool recibido = false;
+    static int idx_mostrar = 0;
+    TickType_t last_update = 0;
+
+    while (1) {
+        // Esperar estructura completa de los 12 bloques
+        if (!recibido && xQueueReceive(Queue_Setpoints, &received_data, portMAX_DELAY) == pdTRUE) {
+            recibido = true;
+            idx_mostrar = 0;
+            last_update = xTaskGetTickCount();
+        }
+
+        // Si ya recibimos, mostramos los 10 valores de resistencias
+        if (recibido && (xTaskGetTickCount() - last_update >= pdMS_TO_TICKS(1000))) {
+            last_update = xTaskGetTickCount();
+
+            if (idx_mostrar < 10) {
+                snprintf(lcd_buffer.textoLCD[0], 20, "RESISTENCIA %02d", idx_mostrar + 1);
+                snprintf(lcd_buffer.textoLCD[1], 20, "VALOR = %07d OHM", received_data.resistencia_valor[idx_mostrar]);
+                snprintf(lcd_buffer.textoLCD[2], 20, "V_MAX = %4.1f V", received_data.V_max);
+                snprintf(lcd_buffer.textoLCD[3], 20, "I_MAX = %3.0f mA", received_data.I_max * 1000.0f);
+
+                xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
+
+                idx_mostrar++;
+            } else {
+                recibido = false;  // Volver a esperar nuevos datos
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+
 void task_Init(void *params) {
 
     lcd_data_t info_LCD;
     // Inicializacion de GPIO
- 
-
     // Inicialización ENCODER
     // CLK
     gpio_init(PIN_ENC_CLK);
@@ -262,6 +377,7 @@ void task_Init(void *params) {
     
     // Creación de colas y semaforos
     Queue_EscribirLCD = xQueueCreate(1, sizeof(lcd_data_t));
+    Queue_Setpoints = xQueueCreate(1, sizeof(setpoint_data_t));
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -281,6 +397,10 @@ void task_Init(void *params) {
     vTaskDelete(NULL);
 }
 
+
+
+
+
 int main()
 {
     stdio_init_all();
@@ -289,6 +409,7 @@ int main()
     xTaskCreate(task_Init, "Init", configMINIMAL_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_Config, "Config", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(task_EEPROM_RTC, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
     //xTaskCreate(task_polling, "Polling", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
     // Arranca el scheduler
