@@ -46,7 +46,7 @@ typedef struct {
 typedef struct {
     int resistencia_valor[10]; // Valores de las 10 resistencias
     float V_max;               // Tensión máxima
-    float I_max;               // Corriente máxima
+    int I_max;               // Corriente máxima
 } setpoint_data_t;
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
@@ -270,7 +270,7 @@ void task_Config(void *params) {
             setpoint_data_t data;
             memcpy(data.resistencia_valor, valores, sizeof(valores));
             data.V_max = V_max_mV / 10.0f;   // Convertir a float para enviar
-            data.I_max = I_max_mA / 1000.0f;
+            data.I_max = I_max_mA;
 
             xQueueSend(Queue_Setpoints, &data, portMAX_DELAY);
         }
@@ -299,21 +299,40 @@ void task_EEPROM_RTC(void *params) {
             last_update = xTaskGetTickCount();
         }
 
-        // Si ya recibimos, mostramos los 10 valores de resistencias
-        if (recibido && (xTaskGetTickCount() - last_update >= pdMS_TO_TICKS(1000))) {
+        // Si ya recibimos, mostramos los 12 valores de a uno cada 2 segundos
+        if (recibido && (xTaskGetTickCount() - last_update >= pdMS_TO_TICKS(2000))) {
             last_update = xTaskGetTickCount();
 
-            if (idx_mostrar < 10) {
-                snprintf(lcd_buffer.textoLCD[0], 20, "RESISTENCIA %02d", idx_mostrar + 1);
-                snprintf(lcd_buffer.textoLCD[1], 20, "VALOR = %07d OHM", received_data.resistencia_valor[idx_mostrar]);
-                snprintf(lcd_buffer.textoLCD[2], 20, "V_MAX = %4.1f V", received_data.V_max);
-                snprintf(lcd_buffer.textoLCD[3], 20, "I_MAX = %3.0f mA", received_data.I_max * 1000.0f);
+            if (idx_mostrar == 0) {
+                int V_entero = (int)(received_data.V_max * 10.0f);
+                int V_int = V_entero / 10;
+                int V_dec = V_entero % 10;
 
-                xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
+                snprintf(lcd_buffer.textoLCD[0], 20, "VALORES MAXIMOS");
+                lcd_buffer.textoLCD[1][0] = '\0';
+                snprintf(lcd_buffer.textoLCD[2], 20, "V_MAX = %2d.%1d V", V_int, V_dec);
+                snprintf(lcd_buffer.textoLCD[3], 20, "I_MAX = %3d mA", (int)(received_data.I_max * 1000.0f));
+            }
+            else if (idx_mostrar >= 1 && idx_mostrar <= 10) {
+                int r_idx = idx_mostrar - 1;
 
-                idx_mostrar++;
-            } else {
-                recibido = false;  // Volver a esperar nuevos datos
+                snprintf(lcd_buffer.textoLCD[0], 20, "VALORES RESISTENCIA");
+                lcd_buffer.textoLCD[1][0] = '\0';
+                snprintf(lcd_buffer.textoLCD[2], 20, "RESISTENCIA %02d", r_idx + 1);
+                snprintf(lcd_buffer.textoLCD[3], 20, "VALOR = %07d OHM", received_data.resistencia_valor[r_idx]);
+            }
+            else if (idx_mostrar == 11) {
+                snprintf(lcd_buffer.textoLCD[0], 20, "CONFIG GUARDADA");
+                lcd_buffer.textoLCD[1][0] = '\0';
+                lcd_buffer.textoLCD[2][0] = '\0';
+                lcd_buffer.textoLCD[3][0] = '\0';
+            }
+
+            xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
+            idx_mostrar++;
+
+            if (idx_mostrar > 11) {
+                recibido = false;  // Terminamos, esperamos nuevo set
             }
         }
 
