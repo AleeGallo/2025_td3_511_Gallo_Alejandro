@@ -9,7 +9,8 @@
 #include "queue.h"
 #include "semphr.h"
 #include "lcd.h"
-//#include "eeprom.h"
+#include "eeprom.h"
+#include "ds3231.h"
 
 
 /* ----------------- CONSTANTES ---------------- */
@@ -22,9 +23,9 @@
 #define PIN_ENC_CLK 12      // GP12 (pin 16 físico)
 #define PIN_ENC_DT  11      // GP11 (pin 15 físico)
 #define PIN_ENC_SW  10      // GP10 (pin 14 físico)
-#define LCD_DIR 0x27
-#define RTC_DIR 0x68
-#define EEPROM_DIR 0x57
+#define LCD_DIR     0x27
+#define RTC_DIR     0x68
+#define EEPROM_DIR  0x57
 
 #define DEBOUNCE_US 7000    // Tiempo antirrebote en microsegundos
 
@@ -34,8 +35,10 @@
 volatile uint64_t last_clk_time = 0;
 volatile uint64_t last_sw_time = 0;
 
-volatile bool last_clk_state = 1;  // estado anterior de CLK
-volatile bool last_sw_state = 1;   // estado anterior de SW
+volatile bool last_clk_state = 1;  // estado anterior de CLK (Endoder)
+volatile bool last_sw_state = 1;   // estado anterior de SW (Endoder)
+
+ds3231_rtc_t rtc;   // Variable global del RTC
 
 typedef struct {
     char textoLCD[4][20];
@@ -44,13 +47,23 @@ typedef struct {
 
 // REVISAR
 typedef struct {
+    int tipo_Dato;              // Valores de tipo de dato (1.Setpoint / 2.Vmax superado / 3.Imax superado 
+                                //                          4.Vmin superado / 5.Imin superado )
     int resistencia_valor[10]; // Valores de las 10 resistencias
     float V_max;               // Tensión máxima
     int I_max;               // Corriente máxima
 } setpoint_data_t;
 
+typedef struct {
+    eeprom_data_type_t tipo_dato;    // Setpoint o Alarma
+    eeprom_data_id_t id;  // Vmax, Imax, R1-R10, etc.
+    ds3231_datetime_t timestamp;     // Fecha y hora del evento
+    float valor;                     // Valor del setpoint o de la alarma
+} eeprom_data_t;
+
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
+QueueHandle_t Queue_EEPROM;
 QueueHandle_t Queue_EscribirLCD;
 QueueHandle_t Queue_Setpoints;
 QueueHandle_t Queue_ADC_Sensado;
@@ -100,6 +113,32 @@ void gpio_callback(uint gpio, uint32_t events) {
 
 
 
+/*--------------FUNCIONES------------*/
+
+/* void enviar_setpoints_a_eeprom(const setpoint_data_t *setpoints, ds3231_rtc_t *rtc) {
+    eeprom_data_t data;
+
+    // Timestamp actual
+    ds3231_get_datetime(&data.timestamp, rtc);
+
+    // Vmax
+    data.tipo_dato = EEPROM_DATA_SETPOINT;
+    data.id = ID_VMAX;
+    data.valor = setpoints->Vmax;
+    xQueueSend(Queue_EEPROM, &data, portMAX_DELAY);
+
+    // Imax
+    data.id = ID_IMAX;
+    data.valor = setpoints->Imax;
+    xQueueSend(Queue_EEPROM, &data, portMAX_DELAY);
+
+    // R1 a R10
+    for (int i = 0; i < 10; i++) {
+        data.id = (eeprom_data_id_t)(ID_R1 + i);  // ID_R1, ID_R2, ..., ID_R10
+        data.valor = setpoints->R[i];
+        xQueueSend(Queue_EEPROM, &data, portMAX_DELAY);
+    }
+} */
 
 
 /*------------- TAREAS -------------*/
@@ -140,8 +179,15 @@ void task_Config(void *params) {
     TickType_t last_cursor_time = 0;
     bool cursor_visible = false;
 
+    eeprom_data_t dato_eeprom;
+    dato_eeprom.tipo_dato = EEPROM_DATA_SETPOINT;
+
     while (1) {
         
+        // Tomo semaforo de estado Configuracion
+        // 
+
+
         int res_idx = pantalla_actual - 2;  // numero de resistencia a guardar
 
         // --- Lógica de armado de pantallas ---
@@ -183,11 +229,6 @@ void task_Config(void *params) {
         // Envío estructura con las 2 primeras líneas
         xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
 
-        // Después de que el LCD imprima el texto, colocamos el símbolo y el texto restante
-      /*   int ohm_col = strlen(lcd_buffer.textoLCD[1]);
-        lcd_set_cursor(1, ohm_col);
-        lcd_put_custom_char(0);  // Muestra símbolo Ω */
-
 
         // 👉 Mover cursor físico al dígito seleccionado solo si cambió
         if (digit_selected != last_digit_selected) {
@@ -206,7 +247,6 @@ void task_Config(void *params) {
             cursor_visible = true;
             last_cursor_time = xTaskGetTickCount();
             last_digit_selected = digit_selected;
-            
         }
 
         // ==============================
@@ -256,6 +296,27 @@ void task_Config(void *params) {
             TickType_t elapsed = xTaskGetTickCount() - last_press_time;
 
             if (elapsed >= pdMS_TO_TICKS(1000)) {
+                // Mantengo apretado, confirmo y paso al siguiente dato
+                ds3231_get_datetime(&dato_eeprom.timestamp, &rtc);  // Obtener fecha/hora actual
+
+                switch (pantalla_actual) {
+                    case 0:
+                        dato_eeprom.id = ID_VMAX;
+                        dato_eeprom.valor = V_max_mV / 10.0f;
+                        break;
+                    case 1:
+                        dato_eeprom.id = ID_IMAX;
+                        dato_eeprom.valor = (float)I_max_mA;
+                        break;
+                    default:
+                        dato_eeprom.id = ID_R1 + res_idx;  // ID_R1 debe ser base de ID_R1 a ID_R10
+                        dato_eeprom.valor = (float)valores[res_idx];
+                        break;
+                }
+
+                // Mando cola para guardar el dato
+                xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
+                
                 pantalla_actual = (pantalla_actual + 1) % 12;
                 digit_selected = 0;
             } else if (elapsed >= pdMS_TO_TICKS(100)) {
@@ -266,6 +327,7 @@ void task_Config(void *params) {
         }
 
 
+    /*  ENVIO DE COLA UNA VEZ SE COMPLETAN LOS 12 CAMPOS. SE ELIMINA PARA ENVIAR DE A 1 DATO A MEDIDA QUE SE CONFIRMA   
         if (pantalla_actual == 11 && pressed && (xTaskGetTickCount() - last_press_time >= pdMS_TO_TICKS(1000))) {
             setpoint_data_t data;
             memcpy(data.resistencia_valor, valores, sizeof(valores));
@@ -273,9 +335,10 @@ void task_Config(void *params) {
             data.I_max = I_max_mA;
 
             xQueueSend(Queue_Setpoints, &data, portMAX_DELAY);
-        }
+        } */
 
-        /* if (cursor_visible && (xTaskGetTickCount() - last_cursor_time > pdMS_TO_TICKS(2000))) {
+        /* APAGADO DE CURSOR 
+        if (cursor_visible && (xTaskGetTickCount() - last_cursor_time > pdMS_TO_TICKS(2000))) {
             lcd_show_cursor(false, false);
             cursor_visible = false;
         }
@@ -397,6 +460,7 @@ void task_Init(void *params) {
     // Creación de colas y semaforos
     Queue_EscribirLCD = xQueueCreate(1, sizeof(lcd_data_t));
     Queue_Setpoints = xQueueCreate(1, sizeof(setpoint_data_t));
+    Queue_EEPROM = xQueueCreate(12, sizeof(eeprom_data_t));
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
