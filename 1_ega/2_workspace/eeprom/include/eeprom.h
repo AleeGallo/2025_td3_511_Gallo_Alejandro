@@ -9,9 +9,20 @@
 #define EEPROM_ADDR 0x57
 #define EEPROM_PAGE_SIZE 32
 
+#define EEPROM_ADDR_SETPOINTS   0x0000
+#define EEPROM_ADDR_ALARMAS     0x0400
+#define EEPROM_ADDR_LECTURAS    0x0800
+#define EEPROM_MAX_SIZE         0x1000  // 4096 bytes
+
+#define EEPROM_SIZE_SETPOINTS   0x0400  // 1024 bytes
+#define EEPROM_SIZE_ALARMAS     0x0400  // 1024 bytes
+#define EEPROM_SIZE_LECTURAS    0x0800  // 2048 bytes
+
+
 typedef enum {
     EEPROM_DATA_SETPOINT,
-    EEPROM_DATA_ALARMA
+    EEPROM_DATA_ALARMA,
+    EEPROM_DATA_LECTURA  // ← nuevo
 } eeprom_data_type_t;
 
 typedef enum {

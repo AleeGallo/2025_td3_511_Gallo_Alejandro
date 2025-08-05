@@ -140,6 +140,28 @@ void gpio_callback(uint gpio, uint32_t events) {
     }
 } */
 
+void mostrar_ultimos_setpoints(void) {
+    lcd_data_t lcd_buffer;
+    eeprom_data_t dato;
+    uint8_t buffer[sizeof(eeprom_data_t)];
+    uint16_t addr = EEPROM_ADDR_SETPOINTS;
+
+    for (int i = 0; i < 12; i++) {
+        eeprom_read_data(i2c_default, addr, buffer, sizeof(buffer));
+        memcpy(&dato, buffer, sizeof(dato));
+
+        // Mostrar en LCD
+        snprintf(lcd_buffer.textoLCD[0], 20, "ID: %d Tipo: %d", dato.id, dato.tipo_dato);
+        snprintf(lcd_buffer.textoLCD[1], 20, "Valor: %.2f", dato.valor);
+        snprintf(lcd_buffer.textoLCD[2], 20, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
+        snprintf(lcd_buffer.textoLCD[3], 20, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
+
+        xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(2000));  // 2 segundos por pantalla
+
+        addr += sizeof(eeprom_data_t);
+    }
+}
 
 /*------------- TAREAS -------------*/
 
@@ -327,7 +349,8 @@ void task_Config(void *params) {
         }
 
 
-    /*  ENVIO DE COLA UNA VEZ SE COMPLETAN LOS 12 CAMPOS. SE ELIMINA PARA ENVIAR DE A 1 DATO A MEDIDA QUE SE CONFIRMA   
+    /*  ENVIO DE COLA UNA VEZ SE COMPLETAN LOS 12 CAMPOS. SE ELIMINA PARA ENVIAR DE A 1 DATO A MEDIDA QUE SE CONFIRMA
+       
         if (pantalla_actual == 11 && pressed && (xTaskGetTickCount() - last_press_time >= pdMS_TO_TICKS(1000))) {
             setpoint_data_t data;
             memcpy(data.resistencia_valor, valores, sizeof(valores));
@@ -347,7 +370,7 @@ void task_Config(void *params) {
     }
 }
 
-void task_EEPROM_RTC(void *params) {
+/* void task_EEPROM_RTC(void *params) {
     setpoint_data_t received_data;
     lcd_data_t lcd_buffer;
     static bool recibido = false;
@@ -400,6 +423,64 @@ void task_EEPROM_RTC(void *params) {
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+ */
+
+ void task_EEPROM(void *params) {
+    eeprom_data_t dato;
+    static uint16_t addr_setpoints = EEPROM_ADDR_SETPOINTS;
+    static uint16_t addr_alarmas   = EEPROM_ADDR_ALARMAS;
+    static uint16_t addr_lecturas  = EEPROM_ADDR_LECTURAS;
+
+    while (1) {
+        if (xQueueReceive(Queue_EEPROM, &dato, portMAX_DELAY) == pdTRUE) {
+            uint8_t buffer[sizeof(eeprom_data_t)];
+            memcpy(buffer, &dato, sizeof(eeprom_data_t));
+
+            uint16_t *addr_ptr = NULL;
+            uint16_t addr_max = 0;
+            uint16_t addr_min = 0;
+
+            switch (dato.tipo_dato) {
+                case EEPROM_DATA_SETPOINT:
+                    addr_ptr = &addr_setpoints;
+                    addr_min = EEPROM_ADDR_SETPOINTS;
+                    addr_max = EEPROM_ADDR_SETPOINTS + EEPROM_SIZE_SETPOINTS;
+                    break;
+
+                case EEPROM_DATA_ALARMA:
+                    addr_ptr = &addr_alarmas;
+                    addr_min = EEPROM_ADDR_ALARMAS;
+                    addr_max = EEPROM_ADDR_ALARMAS + EEPROM_SIZE_ALARMAS;
+                    break;
+
+                case EEPROM_DATA_LECTURA:
+                    addr_ptr = &addr_lecturas;
+                    addr_min = EEPROM_ADDR_LECTURAS;
+                    addr_max = EEPROM_ADDR_LECTURAS + EEPROM_SIZE_LECTURAS;
+                    break;
+
+                default:
+                    continue;  // Tipo desconocido, no escribir
+            }
+
+            // Reinicio circular por zona
+            if (*addr_ptr + sizeof(eeprom_data_t) > addr_max) {
+                *addr_ptr = addr_min;  // reiniciar a comienzo de la zona
+            }
+
+            // Toma Semaforo Mutex para escribir EEPROM
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                //Escribe EEPROM
+                eeprom_write_data(i2c_default, *addr_ptr, buffer, sizeof(buffer));
+                // Entrega Semaforo Mutex
+                xSemaphoreGive(Sem_I2C0_Mutex);      
+                *addr_ptr += sizeof(eeprom_data_t);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -492,7 +573,7 @@ int main()
     xTaskCreate(task_Init, "Init", configMINIMAL_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_Config, "Config", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(task_EEPROM_RTC, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
+    xTaskCreate(task_EEPROM, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
     //xTaskCreate(task_polling, "Polling", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
     // Arranca el scheduler
