@@ -545,6 +545,9 @@ void task_Init(void *params) {
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
+    Sem_Bin_Config       = xSemaphoreCreateBinary();
+    Sem_Bin_ReadyToRead  = xSemaphoreCreateBinary();
+    Sem_I2C0_Mutex       = xSemaphoreCreateBinary();
 
 // -----------------  PRUEBA DE ENVIO DE DATOS ------------------- 
 // Envio la cola
