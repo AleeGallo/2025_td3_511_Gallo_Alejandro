@@ -19,6 +19,12 @@
 #define MAX_COUNT   10000
 #define PIN_LCD_SDA 20      // GP20 (pin 26 físico)
 #define PIN_LCD_SCL 21      // GP21 (pin 27 físico)
+#define PIN_RTC_SDA 20
+#define PIN_RTC_SCL 21
+
+#define PIN_BTN_CONFIG  9
+#define PIN_LED_MAX     8
+#define PIN_LED_MIN     7
 
 #define PIN_ENC_CLK 12      // GP12 (pin 16 físico)
 #define PIN_ENC_DT  11      // GP11 (pin 15 físico)
@@ -31,14 +37,16 @@
 
 /* ----------------- VARIABLES Y ESTRUCTURAS ----------------- */
 
-// Variables internas
+// Variables de antirrebote
 volatile uint64_t last_clk_time = 0;
 volatile uint64_t last_sw_time = 0;
+volatile bool last_clk_state = 1;  // estado anterior de CLK (Encoder)
+volatile bool last_sw_state = 1;   // estado anterior de SW (Encoder)
+static uint64_t last_config_time = 0;
+static bool last_config_state = 1;  // Se asume que el botón está en reposo (pull-up -> alto)
 
-volatile bool last_clk_state = 1;  // estado anterior de CLK (Endoder)
-volatile bool last_sw_state = 1;   // estado anterior de SW (Endoder)
-
-ds3231_rtc_t rtc;   // Variable global del RTC
+ds3231_rtc_t rtc;       // Variable global del RTC
+ds3231_datetime_t dt;   // Datetime global del RTC
 
 typedef struct {
     char textoLCD[4][20];
@@ -108,9 +116,23 @@ void gpio_callback(uint gpio, uint32_t events) {
         last_sw_state = sw;
     }
 
+    if (gpio == PIN_BTN_CONFIG) {
+        uint64_t now = time_us_64();
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+        bool config = gpio_get(PIN_BTN_CONFIG);  // Leer estado actual
+
+        // Detectar flanco de bajada con antirrebote
+        if (!config && last_config_state && (now - last_config_time) > 20000) {
+            last_config_time = now;
+            xSemaphoreGiveFromISR(Sem_Bin_Config, &xHigherPriorityTaskWoken);
+        }
+
+        last_config_state = config;
+    }
+
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
 
 
 /*--------------FUNCIONES------------*/
@@ -217,7 +239,7 @@ void task_Config(void *params) {
         if (xSemaphoreTake(Sem_Bin_Config, portMAX_DELAY) == pdTRUE){
 
             // Tomo semaforo ReadyToRead, trabajando como si fuese un Mutex
-            xSemaphoreTake(Sem_Bin_ReadyToRead, portMAX_DELAY);
+            //xSemaphoreTake(Sem_Bin_ReadyToRead, portMAX_DELAY);
 
             int res_idx = pantalla_actual - 2;  // numero de resistencia a guardar
 
@@ -322,13 +344,18 @@ void task_Config(void *params) {
                 last_press_time = xTaskGetTickCount();
             }
 
+            // ----> Confirmo valor
             if (gpio_get(PIN_ENC_SW) == 1 && pressed) {
                 pressed = false;
                 TickType_t elapsed = xTaskGetTickCount() - last_press_time;
 
                 if (elapsed >= pdMS_TO_TICKS(1000)) {
                     // Mantengo apretado, confirmo y paso al siguiente dato
-                    ds3231_get_datetime(&dato_eeprom.timestamp, &rtc);  // Obtener fecha/hora actual
+                    if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        ds3231_get_datetime(&dt, &rtc);  // Obtener fecha/hora actual
+                        dato_eeprom.timestamp = dt;
+                        xSemaphoreGive(Sem_I2C0_Mutex);
+                    }
 
                     switch (pantalla_actual) {
                         case 0:
@@ -344,10 +371,11 @@ void task_Config(void *params) {
                             dato_eeprom.valor = (float)valores[res_idx];
                             break;
                     }
-
-                    // Mando cola para guardar el dato
-                    xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
                     
+                    // Mando cola para guardar el dato y espero un segundo
+                    xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+
                     // 👉 Si es el último parámetro, mostrar los 12 setpoints guardados
                     if (pantalla_actual == 11) {
                         snprintf(lcd_buffer.textoLCD[0], 20, "CONFIG GUARDADA");
@@ -359,7 +387,7 @@ void task_Config(void *params) {
                         mostrar_ultimos_setpoints();
                         
                         // Da semaforo para empezar a medir
-                        xSemaphoreGive(Sem_Bin_ReadyToRead);
+                        //xSemaphoreGive(Sem_Bin_ReadyToRead);
                     }
                     // Avanza al siguiente parámetro
                     pantalla_actual = (pantalla_actual + 1) % 12;
@@ -390,67 +418,11 @@ void task_Config(void *params) {
             cursor_visible = false;
         }
         */
+            xSemaphoreGive(Sem_Bin_Config);
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
 }
-
-/* void task_EEPROM_RTC(void *params) {
-    setpoint_data_t received_data;
-    lcd_data_t lcd_buffer;
-    static bool recibido = false;
-    static int idx_mostrar = 0;
-    TickType_t last_update = 0;
-
-    while (1) {
-        // Esperar estructura completa de los 12 bloques
-        if (!recibido && xQueueReceive(Queue_Setpoints, &received_data, portMAX_DELAY) == pdTRUE) {
-            recibido = true;
-            idx_mostrar = 0;
-            last_update = xTaskGetTickCount();
-        }
-
-        // Si ya recibimos, mostramos los 12 valores de a uno cada 2 segundos
-        if (recibido && (xTaskGetTickCount() - last_update >= pdMS_TO_TICKS(2000))) {
-            last_update = xTaskGetTickCount();
-
-            if (idx_mostrar == 0) {
-                int V_entero = (int)(received_data.V_max * 10.0f);
-                int V_int = V_entero / 10;
-                int V_dec = V_entero % 10;
-
-                snprintf(lcd_buffer.textoLCD[0], 20, "VALORES MAXIMOS");
-                lcd_buffer.textoLCD[1][0] = '\0';
-                snprintf(lcd_buffer.textoLCD[2], 20, "V_MAX = %2d.%1d V", V_int, V_dec);
-                snprintf(lcd_buffer.textoLCD[3], 20, "I_MAX = %3d mA", (int)(received_data.I_max * 1000.0f));
-            }
-            else if (idx_mostrar >= 1 && idx_mostrar <= 10) {
-                int r_idx = idx_mostrar - 1;
-
-                snprintf(lcd_buffer.textoLCD[0], 20, "VALORES RESISTENCIA");
-                lcd_buffer.textoLCD[1][0] = '\0';
-                snprintf(lcd_buffer.textoLCD[2], 20, "RESISTENCIA %02d", r_idx + 1);
-                snprintf(lcd_buffer.textoLCD[3], 20, "VALOR = %07d OHM", received_data.resistencia_valor[r_idx]);
-            }
-            else if (idx_mostrar == 11) {
-                snprintf(lcd_buffer.textoLCD[0], 20, "CONFIG GUARDADA");
-                lcd_buffer.textoLCD[1][0] = '\0';
-                lcd_buffer.textoLCD[2][0] = '\0';
-                lcd_buffer.textoLCD[3][0] = '\0';
-            }
-
-            xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
-            idx_mostrar++;
-
-            if (idx_mostrar > 11) {
-                recibido = false;  // Terminamos, esperamos nuevo set
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
- */
 
  void task_EEPROM(void *params) {
     eeprom_data_t dato;
@@ -460,6 +432,7 @@ void task_Config(void *params) {
     static uint16_t addr_lecturas  = EEPROM_ADDR_LECTURAS;
 
     while (1) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)); // Si no llega nada en 5s, se desbloquea
         if (xQueueReceive(Queue_EEPROM, &dato, portMAX_DELAY) == pdTRUE) {
             uint8_t buffer[sizeof(eeprom_data_t)];
             memcpy(buffer, &dato, sizeof(eeprom_data_t));
@@ -497,16 +470,21 @@ void task_Config(void *params) {
             }
 
             // Toma Semaforo Mutex para escribir EEPROM
-            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
                 //Escribe EEPROM
                 eeprom_write_data(i2c_default, *addr_ptr, buffer, sizeof(buffer));
                 // Entrega Semaforo Mutex
                 xSemaphoreGive(Sem_I2C0_Mutex);      
                 *addr_ptr += sizeof(eeprom_data_t);
-            }
+            } 
+
+            
             snprintf(lcd_text.textoLCD[2], 20, "   GUARDADO OK");
+            lcd_text.textoLCD[0][0] = '\0';
+            lcd_text.textoLCD[1][0] = '\0';
+            lcd_text.textoLCD[3][0] = '\0';
             xQueueSend(Queue_EscribirLCD, &lcd_text, portMAX_DELAY);
-            vTaskDelay(pdMS_TO_TICKS(500));  // Mostrar 0.5s el mensaje antes de avanzar
+            //vTaskDelay(pdMS_TO_TICKS(500));  // Mostrar 0.5s el mensaje antes de avanzar
 
         }
 
@@ -533,19 +511,38 @@ void task_Init(void *params) {
     gpio_set_dir(PIN_ENC_SW, GPIO_IN);
     gpio_pull_up(PIN_ENC_SW);
 
+    // LEDs
+    gpio_init(PIN_LED_MAX);
+    gpio_set_dir(PIN_LED_MAX, GPIO_OUT);
+    gpio_put(PIN_LED_MAX, 0);  // Apagar al inicio
+
+    gpio_init(PIN_LED_MIN);
+    gpio_set_dir(PIN_LED_MIN, GPIO_OUT);
+    gpio_put(PIN_LED_MIN, 0);  // Apagar al inicio
+
+    // BOTON
+    gpio_init(PIN_BTN_CONFIG);
+    gpio_set_dir(PIN_BTN_CONFIG, GPIO_IN);
+    gpio_pull_up(PIN_BTN_CONFIG);
+
     // IRQs
     gpio_set_irq_enabled_with_callback(PIN_ENC_CLK, GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
     gpio_set_irq_enabled(PIN_ENC_SW, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(PIN_BTN_CONFIG, GPIO_IRQ_EDGE_FALL, true);
 
     // Inicialización I2C a 100KHz
     i2c_init(i2c0, 100000);
-    // Configurar los pines con función I2C
+    // Inicialización LCD
     gpio_set_function(PIN_LCD_SDA, GPIO_FUNC_I2C);
     gpio_set_function(PIN_LCD_SCL, GPIO_FUNC_I2C);
-    //Resistencias de pull up
     gpio_pull_up(PIN_LCD_SDA);
     gpio_pull_up(PIN_LCD_SCL);
-
+    // Inicialización RTC
+    //ds3231_init(i2c0, PIN_RTC_SDA, PIN_RTC_SCL, &rtc);
+    rtc.i2c_port = i2c0;
+    rtc.i2c_addr = DS3231_I2C_ADDRESS;
+    
+    ds3231_get_datetime(&dt, &rtc);
 
     // Inicializa el LCD con el I2C0 y la direccion de 7 bits 0x27
     lcd_init(i2c0, LCD_DIR);
@@ -569,9 +566,9 @@ void task_Init(void *params) {
     lcd_set_cursor(0, 0);
     
     // Creación de colas y semaforos
-    Queue_EscribirLCD = xQueueCreate(1, sizeof(lcd_data_t));
-    Queue_Setpoints = xQueueCreate(1, sizeof(setpoint_data_t));
-    Queue_EEPROM = xQueueCreate(12, sizeof(eeprom_data_t));
+    Queue_EscribirLCD   = xQueueCreate(1, sizeof(lcd_data_t));
+    Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
+    Queue_EEPROM        = xQueueCreate(12, sizeof(eeprom_data_t));
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -579,16 +576,8 @@ void task_Init(void *params) {
     Sem_Bin_ReadyToRead  = xSemaphoreCreateBinary();
     Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
 
-// -----------------  PRUEBA DE ENVIO DE DATOS ------------------- 
-// Envio la cola
-/*
-    snprintf(info_LCD.textoLCD[0], 20, "PRUEBA 1");
-    snprintf(info_LCD.textoLCD[1], 20, "PRUEBA 2");
-    snprintf(info_LCD.textoLCD[2], 20, "PRUEBA 3");
-    snprintf(info_LCD.textoLCD[3], 20, "PRUEBA 4");
-    xQueueSend (Queue_EscribirLCD, &info_LCD, portMAX_DELAY);
-*/
-// -----------------------------------------------------------------
+
+    xSemaphoreGive(Sem_Bin_Config);
 
     // Elimino la tarea para liberar recursos
     vTaskDelete(NULL);
@@ -601,12 +590,12 @@ void task_Init(void *params) {
 int main()
 {
     stdio_init_all();
-
+    //TaskHandle_t hTask_EEPROM;
     /* Creacion de tareas */ 
     xTaskCreate(task_Init, "Init", configMINIMAL_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_Config, "Config", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(task_EEPROM, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 3, NULL);
+    xTaskCreate(task_EEPROM, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     //xTaskCreate(task_polling, "Polling", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
     // Arranca el scheduler
