@@ -134,4 +134,5 @@ void lcd_init(i2c_inst_t *i2c, uint8_t address) {
     lcd_send_byte(LCD_FUNCTIONSET | LCD_2LINE, LCD_COMMAND);
     lcd_send_byte(LCD_DISPLAYCONTROL | LCD_DISPLAYON | LCD_CURSORON | LCD_BLINKON, LCD_COMMAND);    // Para mostrar el cursor y hacer parpadear
     lcd_clear();
+    lcd_set_cursor(0, 0);
 }

@@ -184,7 +184,28 @@ void mostrar_ultimos_setpoints(void) {
         addr += sizeof(eeprom_data_t);
     }
 }
+/* 
+void mostrar_dato_eeprom(uint16_t addr) {
+    lcd_data_t lcd_buffer;
+    eeprom_data_t dato;
+    uint8_t buffer[sizeof(eeprom_data_t)];
 
+    // Leer dato desde EEPROM
+    if (xSemaphoreTake(Sem_I2C0_Mutex, portMAX_DELAY) == pdTRUE) {
+        eeprom_read_data(i2c_default, addr, buffer, sizeof(buffer));
+        xSemaphoreGive(Sem_I2C0_Mutex); // Liberar el mutex
+    } 
+    memcpy(&dato, buffer, sizeof(dato));
+
+    // Preparar texto para LCD
+    snprintf(lcd_buffer.textoLCD[0], 20, "ID: %d Tipo: %d", dato.id, dato.tipo_dato);
+    snprintf(lcd_buffer.textoLCD[1], 20, "Valor: %.2f", dato.valor);
+    snprintf(lcd_buffer.textoLCD[2], 20, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
+    snprintf(lcd_buffer.textoLCD[3], 20, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
+
+    // Enviar a cola para mostrar en LCD
+    xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
+} */
 /*------------- TAREAS -------------*/
 
 void task_LCD (void *params) {
@@ -374,7 +395,7 @@ void task_Config(void *params) {
                     
                     // Mando cola para guardar el dato y espero un segundo
                     xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
-                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    vTaskDelay(pdMS_TO_TICKS(2000));
 
                     // 👉 Si es el último parámetro, mostrar los 12 setpoints guardados
                     if (pantalla_actual == 11) {
@@ -432,9 +453,10 @@ void task_Config(void *params) {
     static uint16_t addr_lecturas  = EEPROM_ADDR_LECTURAS;
 
     while (1) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)); // Si no llega nada en 5s, se desbloquea
+        //ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)); // Si no llega nada en 5s, se desbloquea
         if (xQueueReceive(Queue_EEPROM, &dato, portMAX_DELAY) == pdTRUE) {
             uint8_t buffer[sizeof(eeprom_data_t)];
+            uint8_t buffer_lectura[sizeof(eeprom_data_t)];
             memcpy(buffer, &dato, sizeof(eeprom_data_t));
 
             uint16_t *addr_ptr = NULL;
@@ -473,18 +495,22 @@ void task_Config(void *params) {
             if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
                 //Escribe EEPROM
                 eeprom_write_data(i2c_default, *addr_ptr, buffer, sizeof(buffer));
+                //Lee EEPROM para ver si leyo OK
+                eeprom_read_data(i2c_default, *addr_ptr, buffer_lectura, sizeof(buffer));
                 // Entrega Semaforo Mutex
                 xSemaphoreGive(Sem_I2C0_Mutex);      
                 *addr_ptr += sizeof(eeprom_data_t);
             } 
-
             
-            snprintf(lcd_text.textoLCD[2], 20, "   GUARDADO OK");
-            lcd_text.textoLCD[0][0] = '\0';
-            lcd_text.textoLCD[1][0] = '\0';
-            lcd_text.textoLCD[3][0] = '\0';
+            memcpy(&dato, buffer_lectura, sizeof(dato));
+
+            // Armar el contenido a mostrar
+            snprintf(lcd_text.textoLCD[0], 20, "GUARDADO - ID: %d  ", dato.id, dato.tipo_dato);
+            snprintf(lcd_text.textoLCD[1], 20, "Valor: %.2f", dato.valor);
+            snprintf(lcd_text.textoLCD[2], 20, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
+            snprintf(lcd_text.textoLCD[3], 20, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
+
             xQueueSend(Queue_EscribirLCD, &lcd_text, portMAX_DELAY);
-            //vTaskDelay(pdMS_TO_TICKS(500));  // Mostrar 0.5s el mensaje antes de avanzar
 
         }
 
@@ -495,8 +521,6 @@ void task_Config(void *params) {
 
 void task_Init(void *params) {
 
-    lcd_data_t info_LCD;
-    // Inicializacion de GPIO
     // Inicialización ENCODER
     // CLK
     gpio_init(PIN_ENC_CLK);
@@ -511,7 +535,7 @@ void task_Init(void *params) {
     gpio_set_dir(PIN_ENC_SW, GPIO_IN);
     gpio_pull_up(PIN_ENC_SW);
 
-    // LEDs
+    // Inicialización LEDs
     gpio_init(PIN_LED_MAX);
     gpio_set_dir(PIN_LED_MAX, GPIO_OUT);
     gpio_put(PIN_LED_MAX, 0);  // Apagar al inicio
@@ -520,7 +544,7 @@ void task_Init(void *params) {
     gpio_set_dir(PIN_LED_MIN, GPIO_OUT);
     gpio_put(PIN_LED_MIN, 0);  // Apagar al inicio
 
-    // BOTON
+    // Inicialización BOTON
     gpio_init(PIN_BTN_CONFIG);
     gpio_set_dir(PIN_BTN_CONFIG, GPIO_IN);
     gpio_pull_up(PIN_BTN_CONFIG);
@@ -541,34 +565,27 @@ void task_Init(void *params) {
     //ds3231_init(i2c0, PIN_RTC_SDA, PIN_RTC_SCL, &rtc);
     rtc.i2c_port = i2c0;
     rtc.i2c_addr = DS3231_I2C_ADDRESS;
-    
     ds3231_get_datetime(&dt, &rtc);
+
+    if (dt.year <= 2001){
+        dt.seconds = 0;
+        dt.minutes = 0;
+        dt.hour = 23;
+        dt.day = 8;
+        dt.month = 8;
+        dt.year = 2025;
+        dt.dotw = 5;
+        ds3231_set_datetime(&dt, &rtc);
+    }
+
 
     // Inicializa el LCD con el I2C0 y la direccion de 7 bits 0x27
     lcd_init(i2c0, LCD_DIR);
-    // Limpia la pantalla
-    lcd_clear();
-    
-    // Definición del símbolo Ω en slot 0
-  /*   uint8_t ohm_char[8] = {
-        0b00000,  
-        0b01110, 
-        0b10001,  
-        0b10001,  
-        0b10001,  
-        0b01010,  
-        0b01010,   
-        0b11011    
-    };
-    lcd_create_char(0, ohm_char); */
-
-    // Imprimo mensaje fijo
-    lcd_set_cursor(0, 0);
     
     // Creación de colas y semaforos
     Queue_EscribirLCD   = xQueueCreate(1, sizeof(lcd_data_t));
     Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
-    Queue_EEPROM        = xQueueCreate(12, sizeof(eeprom_data_t));
+    Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_data_t));
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -584,14 +601,10 @@ void task_Init(void *params) {
 }
 
 
-
-
-
 int main()
 {
     stdio_init_all();
-    //TaskHandle_t hTask_EEPROM;
-    /* Creacion de tareas */ 
+    // Creacion de tareas
     xTaskCreate(task_Init, "Init", configMINIMAL_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_Config, "Config", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
