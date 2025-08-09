@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
@@ -16,22 +17,26 @@
 /* ----------------- CONSTANTES ---------------- */
 
 // Maximo valor de cuenta para el semaforo
-#define MAX_COUNT   10000
-#define PIN_LCD_SDA 20      // GP20 (pin 26 físico)
-#define PIN_LCD_SCL 21      // GP21 (pin 27 físico)
-#define PIN_RTC_SDA 20
-#define PIN_RTC_SCL 21
-
+#define MAX_COUNT       10000
+#define PIN_LCD_SDA     20      // GP20 (pin 26 físico)
+#define PIN_LCD_SCL     21      // GP21 (pin 27 físico)
+#define PIN_RTC_SDA     20
+#define PIN_RTC_SCL     21  
+#define PIN_ENC_CLK     12      // GP12 (pin 16 físico)
+#define PIN_ENC_DT      11      // GP11 (pin 15 físico)
+#define PIN_ENC_SW      10      // GP10 (pin 14 físico)
 #define PIN_BTN_CONFIG  9
 #define PIN_LED_MAX     8
 #define PIN_LED_MIN     7
 
-#define PIN_ENC_CLK 12      // GP12 (pin 16 físico)
-#define PIN_ENC_DT  11      // GP11 (pin 15 físico)
-#define PIN_ENC_SW  10      // GP10 (pin 14 físico)
 #define LCD_DIR     0x27
 #define RTC_DIR     0x68
 #define EEPROM_DIR  0x57
+
+// Constantes del sistema
+#define R_SHUNT     0.1f    // Ohms
+#define ADC_MAX     4095.0f // Resolución ADC de 12 bits
+#define VREF        3.3f    // Voltaje de referencia ADC
 
 #define DEBOUNCE_US 7000    // Tiempo antirrebote en microsegundos
 
@@ -48,19 +53,23 @@ static bool last_config_state = 1;  // Se asume que el botón está en reposo (p
 ds3231_rtc_t rtc;       // Variable global del RTC
 ds3231_datetime_t dt;   // Datetime global del RTC
 
+// PID variables
+float Kp = 1.0f, Ki = 0.1f, Kd = 0.05f;
+float setpoint_R = 10.0f; // Resistencia deseada en Ohms
+
+
 typedef struct {
     char textoLCD[4][20];
 } lcd_data_t;
 
-
-// REVISAR
+/* // REVISAR
 typedef struct {
     int tipo_Dato;              // Valores de tipo de dato (1.Setpoint / 2.Vmax superado / 3.Imax superado 
                                 //                          4.Vmin superado / 5.Imin superado )
     int resistencia_valor[10]; // Valores de las 10 resistencias
     float V_max;               // Tensión máxima
     int I_max;               // Corriente máxima
-} setpoint_data_t;
+} setpoint_data_t; */
 
 typedef struct {
     eeprom_data_type_t tipo_dato;    // Setpoint o Alarma
@@ -69,12 +78,19 @@ typedef struct {
     float valor;                     // Valor del setpoint o de la alarma
 } eeprom_data_t;
 
+typedef struct {
+    float Vin;      // Voltaje en la carga
+    float Vshunt;   // Voltaje en la resistencia shunt
+    float Iload;    // Corriente en la carga
+} sensado_data_t;
+
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
+//QueueHandle_t Queue_Setpoints;
 QueueHandle_t Queue_EEPROM;
 QueueHandle_t Queue_EscribirLCD;
-QueueHandle_t Queue_Setpoints;
-QueueHandle_t Queue_ADC_Sensado;
+QueueHandle_t Queue_Sensado;
+QueueHandle_t Queue_PWM;
 SemaphoreHandle_t Sem_Bin_Select_Mas, Sem_Bin_Select_Menos, Sem_Bin_OK;     // Tiene que ser externo?
 SemaphoreHandle_t Sem_Bin_Config, Sem_Bin_Memory, Sem_Bin_ReadyToRead;      // Tiene que ser externo?
 SemaphoreHandle_t Sem_I2C0_Mutex;
@@ -206,6 +222,7 @@ void mostrar_dato_eeprom(uint16_t addr) {
     // Enviar a cola para mostrar en LCD
     xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
 } */
+
 /*------------- TAREAS -------------*/
 
 void task_LCD (void *params) {
@@ -229,6 +246,74 @@ void task_LCD (void *params) {
             }
         }
         vTaskDelay(pdMS_TO_TICKS(20)); // pequeña pausa para evitar saturar
+    }
+}
+
+void task_Sensado(void *pvParameters) {
+    sensado_data_t lectura;
+
+    while(1) {
+        if (xSemaphoreTake(Mutex_ADC, portMAX_DELAY) == pdTRUE) {
+            // Leer ADC Vsens
+            uint16_t adc_vin = adc_read_channel(0); // Ejemplo canal 0
+            lectura.Vin = (adc_vin / ADC_MAX) * VREF;
+
+            // Leer ADC Vin
+            uint16_t adc_vshunt = adc_read_channel(1); // Ejemplo canal 1
+            lectura.Vshunt = (adc_vshunt / ADC_MAX) * VREF;
+
+            xSemaphoreGive(Mutex_ADC);
+        }
+
+        // Calcular corriente
+        lectura.Iload = lectura.Vshunt / R_SHUNT;
+
+        // Mandar datos al controlador
+        xQueueSend(Queue_Sensado, &lectura, 0);
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // Cada 100 ms
+    }
+}
+
+void task_Control(void *pvParameters) {
+    sensado_data_t datos;
+    float pwm_out;
+    float error, prev_error = 0, integral = 0;
+
+    for(;;) {
+        if (xQueueReceive(Queue_Sensado, &datos, portMAX_DELAY) == pdTRUE) {
+            // Calcular resistencia real
+            float R_actual = (datos.Iload > 0.001f) ? datos.Vin / datos.Iload : 9999.0f;
+
+            // Calcular error
+            error = setpoint_R - R_actual;
+            integral += error;
+            float derivative = error - prev_error;
+
+            // Control PID
+            float control = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+            // Saturar duty
+            if (control > 100.0f)   control = 100.0f;
+            if (control < 0.0f)     control = 0.0f;
+
+            pwm_out = control;
+            
+            // Enviar a PWM
+            xQueueSend(Queue_PWM, &pwm_out, 0);
+
+            prev_error = error;
+        }
+    }
+}
+
+void task_PWM(void *pvParameters) {
+    float pwm_in;
+
+    while(1) {
+        if (xQueueReceive(Queue_PWM, &pwm_in, portMAX_DELAY) == pdTRUE) {
+            pwm_set_duty_cycle(pwm_in); // Función que maneja tu hardware
+        }
     }
 }
 
@@ -556,6 +641,9 @@ void task_Init(void *params) {
 
     // Inicialización I2C a 100KHz
     i2c_init(i2c0, 100000);
+    adc_init();
+    pwm_init_channel(0);
+
     // Inicialización LCD
     gpio_set_function(PIN_LCD_SDA, GPIO_FUNC_I2C);
     gpio_set_function(PIN_LCD_SCL, GPIO_FUNC_I2C);
@@ -578,14 +666,15 @@ void task_Init(void *params) {
         ds3231_set_datetime(&dt, &rtc);
     }
 
-
     // Inicializa el LCD con el I2C0 y la direccion de 7 bits 0x27
     lcd_init(i2c0, LCD_DIR);
     
     // Creación de colas y semaforos
     Queue_EscribirLCD   = xQueueCreate(1, sizeof(lcd_data_t));
-    Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
+    //Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
     Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_data_t));
+    Queue_Sensado       = xQueueCreate(5, sizeof(sensado_data_t));
+    Queue_PWM           = xQueueCreate(5, sizeof(float));
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -609,7 +698,10 @@ int main()
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_Config, "Config", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_EEPROM, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    //xTaskCreate(task_polling, "Polling", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    // Revisar prioridad y memoria
+    xTaskCreate(task_Sensado, "Sensado", 1024, NULL, 2, NULL);
+    xTaskCreate(task_Control, "Control", 1024, NULL, 2, NULL);
+    xTaskCreate(task_PWM, "PWM", 512, NULL, 2, NULL);
 
     // Arranca el scheduler
     vTaskStartScheduler();
