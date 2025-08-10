@@ -1,12 +1,3 @@
-[submodule "1_ega/MCP4725_PICO"]
-	path = 1_ega/MCP4725_PICO
-	url = https://github.com/AleeGallo/MCP4725_PICO.git
-[submodule "1_ega/pico-ds3231"]
-	path = 1_ega/pico-ds3231
-	url = https://github.com/AleeGallo/pico-ds3231.git
-[submodule "1_ega/2_workspace/pico-ds3231"]
-	path = 1_ega/2_workspace/pico-ds3231
-	url = https://github.com/AleeGallo/pico-ds3231.git
 [submodule "1_ega/2_workspace/mcp4725"]
 	path = 1_ega/2_workspace/mcp4725
 	url = https://github.com/AleeGallo/mcp4725.git
