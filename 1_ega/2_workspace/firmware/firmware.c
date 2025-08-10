@@ -12,7 +12,7 @@
 #include "lcd.h"
 #include "eeprom.h"
 #include "ds3231.h"
-
+#include "mcp4725.h"
 
 /* ----------------- CONSTANTES ---------------- */
 
@@ -253,17 +253,13 @@ void task_Sensado(void *pvParameters) {
     sensado_data_t lectura;
 
     while(1) {
-        if (xSemaphoreTake(Mutex_ADC, portMAX_DELAY) == pdTRUE) {
-            // Leer ADC Vsens
-            uint16_t adc_vin = adc_read_channel(0); // Ejemplo canal 0
-            lectura.Vin = (adc_vin / ADC_MAX) * VREF;
+        // Leer ADC Vsens
+        uint16_t adc_vin = adc_read_channel(0); // Ejemplo canal 0
+        lectura.Vin = (adc_vin / ADC_MAX) * VREF;
 
-            // Leer ADC Vin
-            uint16_t adc_vshunt = adc_read_channel(1); // Ejemplo canal 1
-            lectura.Vshunt = (adc_vshunt / ADC_MAX) * VREF;
-
-            xSemaphoreGive(Mutex_ADC);
-        }
+        // Leer ADC Vin
+        uint16_t adc_vshunt = adc_read_channel(1); // Ejemplo canal 1
+        lectura.Vshunt = (adc_vshunt / ADC_MAX) * VREF;
 
         // Calcular corriente
         lectura.Iload = lectura.Vshunt / R_SHUNT;
@@ -271,7 +267,7 @@ void task_Sensado(void *pvParameters) {
         // Mandar datos al controlador
         xQueueSend(Queue_Sensado, &lectura, 0);
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // Cada 100 ms
+        vTaskDelay(pdMS_TO_TICKS(100)); // Cada 100 ms --> Determina cada cuanto se va a leer ADC
     }
 }
 
@@ -298,7 +294,7 @@ void task_Control(void *pvParameters) {
             if (control < 0.0f)     control = 0.0f;
 
             pwm_out = control;
-            
+
             // Enviar a PWM
             xQueueSend(Queue_PWM, &pwm_out, 0);
 
@@ -312,7 +308,9 @@ void task_PWM(void *pvParameters) {
 
     while(1) {
         if (xQueueReceive(Queue_PWM, &pwm_in, portMAX_DELAY) == pdTRUE) {
-            pwm_set_duty_cycle(pwm_in); // Función que maneja tu hardware
+            //pwm_set_duty_cycle(pwm_in); // Función que maneja tu hardware
+            
+            //UTILIZAR EL DAC, ver libreria
         }
     }
 }

@@ -48,6 +48,9 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../eeprom ${CMAKE_BINARY_DIR}/eeprom)
 # Add external FreeRTOS library
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../ds3231 ${CMAKE_BINARY_DIR}/ds3231)
 
+# Add external FreeRTOS library
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../mcp4725 ${CMAKE_BINARY_DIR}/mcp4725)
+
 pico_set_program_name(firmware "firmware")
 pico_set_program_version(firmware "0.1")
 
@@ -66,6 +69,7 @@ target_link_libraries(firmware
         freertos
         eeprom
         ds3231
+        mcp4725
         )
 
 # Add the standard include files to the build
