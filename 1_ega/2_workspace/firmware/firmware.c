@@ -110,7 +110,7 @@ typedef struct {
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
-//QueueHandle_t Queue_Setpoints;
+QueueHandle_t Queue_Setpoints;
 QueueHandle_t Queue_EEPROM;
 QueueHandle_t Queue_EscribirLCD;
 QueueHandle_t Queue_Sensado;
@@ -222,13 +222,13 @@ void mostrar_dato_eeprom(uint16_t addr) {
 
 /*------------- TAREAS -------------*/
 
-void vTaskControl(void *pvParameters) {
-    init_i2c();
+void task_Control (void *pvParameters) {
     
     pid_params_t pid = { .Kp = 0.5f, .Ki = 0.1f, .Kd = 0.05f, .Ts = 0.01f };
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint = {0};
-    adc_measurement_t measurement;
+    sensado_data_t measurement;
+    float dac_out;
 
     while(1) {
         // Recibir nuevo setpoint (no bloqueante)
@@ -239,20 +239,25 @@ void vTaskControl(void *pvParameters) {
         // Esperar nueva medición (bloqueante)
         if(xQueueReceive(Queue_Sensado, &measurement, portMAX_DELAY) == pdTRUE) {
             // Calcular corriente deseada: I = V_max / R
-            float I_target = (setpoint.resistencia_valor > 0) ? 
-                            (setpoint.V_max / setpoint.resistencia_valor) * 1000.0f : 0; // mA
+            float I_target;
+            if (R_actual > 0) {
+                I_target = (measurement.Vin_v / R_actual) * 1000.0f;
+            } else {
+                I_target = 0;
+            }
 
             // Control PID
-            float error = I_target - measurement.current_ma;
+            float error = I_target - measurement.Iload_ma;
             pid_state.integral += error * pid.Ts;
             float output = pid.Kp * error + pid.Ki * pid_state.integral;
             
             // Limitar salida (0-4095 para DAC de 12 bits)
             output = fmaxf(0, fminf(output, 4095.0f));
+            
 
-
- 	    //Enviar valor DAC a cola
-            dac_control_t dac_out = { .dac_value = (uint16_t)output };
+ 	        //Enviar valor DAC a cola
+            // dac_out = { .dac_value = (uint16_t)output };
+            dac_out = (output * 5.0f) / 4095.0f;
             xQueueSend(Queue_DAC, &dac_out, portMAX_DELAY);
         }
 
@@ -866,7 +871,7 @@ void task_Init(void *params) {
     
     // Creación de colas y semaforos
     Queue_EscribirLCD   = xQueueCreate(1, sizeof(lcd_data_t));
-    //Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
+    Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
     Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_data_t));
     Queue_Sensado       = xQueueCreate(5, sizeof(sensado_data_t));
     Queue_DAC           = xQueueCreate(5, sizeof(float));
@@ -897,7 +902,7 @@ int main()
     xTaskCreate(task_EEPROM, "Eeprom", 2 * configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     // Revisar prioridad y memoria
     xTaskCreate(task_Sensado, "Sensado", 1024, NULL, 2, NULL);
-    //xTaskCreate(task_Control, "Control", 1024, NULL, 2, NULL);
+    xTaskCreate(task_Control, "Control", 1024, NULL, 2, NULL);
     xTaskCreate(task_DAC, "DAC", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
 
     // Arranca el scheduler
