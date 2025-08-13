@@ -59,15 +59,13 @@ ds3231_rtc_t rtc;       // Variable global del RTC
 ds3231_datetime_t dt;   // Datetime global del RTC
 mcp4725_t dac;
 
-// PID variables
-float Kp = 1.0f, Ki = 0.1f, Kd = 0.05f;
-float setpoint_R = 10.0f; // Resistencia deseada en Ohms
-
 // Valores de resistencias configurados
-uint32_t R_setpoints[10] = {0};  // R1...R10
+
+//uint32_t R_setpoints[10] = {0};  // R1...R10
+
 
 // Tiempo de cambio entre resistencias (ms)
-uint32_t tiempo_cambio_ms = 1000; // valor por defecto, se sobreescribe al leer la configuración
+//uint32_t tiempo_cambio_ms = 1000; // valor por defecto, se sobreescribe al leer la configuración
 
 // Índice y valor de la resistencia actual
 volatile uint8_t indice_R_actual = 0;
@@ -85,10 +83,30 @@ typedef struct {
 } eeprom_data_t;
 
 typedef struct {
+    float Vmax;
+    float Imax;
+    float Vmin;         
+    float Imin;
+    uint32_t tiempo;
+    uint32_t R_setpoints[10];
+} setpoint_data_t;
+
+setpoint_data_t setpoint_global;
+
+typedef struct {
     float Iload_ma;    // Corriente en mA
     float Vin_v;     // Tensión en V
     float Vshunt_v;   // Voltaje en la resistencia shunt
 } sensado_data_t;
+
+typedef struct {
+    float Kp, Ki, Kd, Ts;
+} pid_params_t;
+
+typedef struct {
+    float integral;
+    float prev_error;
+} pid_state_t;
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
@@ -157,15 +175,6 @@ void gpio_callback(uint gpio, uint32_t events) {
 
 /*--------------FUNCIONES------------*/
 
-
-void config_setpoints(int resistencia_value[10], int tiempo){
-    // Set variables globales
-    tiempo_cambio_ms = (uint32_t) tiempo/1000;
-    for (int i=0;i++;i<10){
-        R_setpoints[i] = (uint32_t) resistencia_value[i];
-    }
-}
-
 void mostrar_ultimos_setpoints(void) {
     lcd_data_t lcd_buffer;
     eeprom_data_t dato;
@@ -212,6 +221,44 @@ void mostrar_dato_eeprom(uint16_t addr) {
 } */
 
 /*------------- TAREAS -------------*/
+
+void vTaskControl(void *pvParameters) {
+    init_i2c();
+    
+    pid_params_t pid = { .Kp = 0.5f, .Ki = 0.1f, .Kd = 0.05f, .Ts = 0.01f };
+    pid_state_t pid_state = {0};
+    setpoint_data_t setpoint = {0};
+    adc_measurement_t measurement;
+
+    while(1) {
+        // Recibir nuevo setpoint (no bloqueante)
+        if(xQueueReceive(Queue_Setpoints, &setpoint, 0) == pdTRUE) {
+            pid_state.integral = 0; // Resetear integral al cambiar setpoint
+        }
+
+        // Esperar nueva medición (bloqueante)
+        if(xQueueReceive(Queue_Sensado, &measurement, portMAX_DELAY) == pdTRUE) {
+            // Calcular corriente deseada: I = V_max / R
+            float I_target = (setpoint.resistencia_valor > 0) ? 
+                            (setpoint.V_max / setpoint.resistencia_valor) * 1000.0f : 0; // mA
+
+            // Control PID
+            float error = I_target - measurement.current_ma;
+            pid_state.integral += error * pid.Ts;
+            float output = pid.Kp * error + pid.Ki * pid_state.integral;
+            
+            // Limitar salida (0-4095 para DAC de 12 bits)
+            output = fmaxf(0, fminf(output, 4095.0f));
+
+
+ 	    //Enviar valor DAC a cola
+            dac_control_t dac_out = { .dac_value = (uint16_t)output };
+            xQueueSend(Queue_DAC, &dac_out, portMAX_DELAY);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10)); // 10ms de periodo
+    }
+}
 
 void task_LCD (void *params) {
     lcd_data_t data_print_LCD;
@@ -287,13 +334,12 @@ void task_Sensado(void *pvParameters) {
         uint16_t current_raw = current_sum / num_samples;
         uint16_t voltage_raw = voltage_sum / num_samples;
         
-        // Convierte valores ADC a valores reales
-        
+        // Convierte valores ADC a valores reale
         
         // Convertir corriente:
         // ADC de 12 bits (0-4095) para 0-3.3V
         // Voltaje en shunt: V = I*R = 0.25A * 10Ω = 2.5V
-        float voltage_shunt = ((current_raw / 2.5f) * 3.3f) / 4095.0f;
+        float voltage_shunt = ((current_raw / 2.5f) * 3.25f) / 4095.0f; // Ajuste por tensiones en ADC 
         measurement.Vshunt_v = voltage_shunt;
         measurement.Iload_ma = (voltage_shunt / SHUNT_RESISTANCE) * 1000.0f; // A -> mA
 
@@ -311,11 +357,12 @@ void task_Sensado(void *pvParameters) {
         // Envia por la cola
         xQueueSend(Queue_Sensado, &measurement, portMAX_DELAY);
         
-        
         // Delay para la frecuencia de muestreo deseada
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+
 
 // REVISAR
 /* void task_Control(void *pvParameters) {
@@ -359,6 +406,14 @@ void task_DAC(void *pvParameters) {
             mcp4725_set_voltage(&dac, dac_in, MCP4725_RegisterMode, MCP4725_PowerDown_OFF);
             xSemaphoreGive(Sem_I2C0_Mutex);
         }
+
+       /*  for (int i=1;i<11;i++){
+            float valorM;
+            valorM = i * 0.5;
+            //xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
+            mcp4725_set_voltage(&dac, valorM, MCP4725_RegisterMode, MCP4725_PowerDown_OFF);
+            vTaskDelay(1000);
+        }  */
     }
 }
 
@@ -392,13 +447,6 @@ void task_Config(void *params) {
         
         // Tomo semaforo de estado Configuracion
         if (xSemaphoreTake(Sem_Bin_Config, portMAX_DELAY) == pdTRUE){
-
-          /*   for (int i=1;i<11;i++){
-                float valorM;
-                valorM = i * 0.5;
-                xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
-                vTaskDelay(2000);
-            } */
 
             // Pausar Resistencia
             xSemaphoreTake(Sem_Bin_Resistencia, (TickType_t) 0);
@@ -592,8 +640,16 @@ void task_Config(void *params) {
                                 break;
                         }
                         
-                        // Set de valores globales
-                        config_setpoints(valores, tiempo_seg);
+                        // Set de variables globales
+                        setpoint_global.tiempo = (uint32_t) tiempo_seg/1000;
+                        setpoint_global.Vmax = V_max_mV/10.0f;
+                        setpoint_global.Imax = (float)I_max_mA;
+                        setpoint_global.Vmin = V_min_mV/10.0f;
+                        setpoint_global.Imin = (float)I_min_mA;
+                        for (int i=0;i++;i<10){
+                            setpoint_global.R_setpoints[i] = (uint32_t) valores[i];
+                        }
+
                         // Mando cola para guardar el dato y espero un segundo
                         xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
                         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -716,7 +772,7 @@ void task_Resistencia(void *pvParameters) {
 
         while (uxSemaphoreGetCount(Sem_Bin_Resistencia) > 0) {
             // Actualizar el valor de resistencia actual
-            R_actual = R_setpoints[indice_R_actual];
+            R_actual = setpoint_global.R_setpoints[indice_R_actual];
 
             // Set DAC o a la función que controla la carga
             // dac_set_resistance(R_actual);
@@ -728,7 +784,7 @@ void task_Resistencia(void *pvParameters) {
             }
 
             // Esperar el tiempo configurado
-            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(tiempo_cambio_ms));
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_global.tiempo));
         }
     }
 }
@@ -787,8 +843,8 @@ void task_Init(void *params) {
 
     mcp4725_begin(&dac, DAC_DIR, i2c0, 100, PIN_LCD_SDA, PIN_LCD_SCL, 1000);
 
-    mcp4725_set_reference_voltage(&dac, 5.0);
-    mcp4725_set_voltage(&dac, 4.8, MCP4725_RegisterMode, MCP4725_PowerDown_OFF);
+    mcp4725_set_reference_voltage(&dac, 5);
+    mcp4725_set_voltage(&dac, 5, MCP4725_RegisterMode, MCP4725_PowerDown_OFF);
     
     // Inicialización RTC */
     //ds3231_init(i2c0, PIN_RTC_SDA, PIN_RTC_SCL, &rtc);
