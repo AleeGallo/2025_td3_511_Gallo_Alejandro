@@ -80,7 +80,7 @@ volatile uint8_t indice_R_actual = 0;
 volatile uint32_t R_actual = 0;
 
 typedef struct {
-    char textoLCD[4][20];
+    char textoLCD[4][21];
 } lcd_data_t;
 
 typedef struct {
@@ -140,7 +140,7 @@ void gpio_callback(uint gpio, uint32_t events) {
         bool dt  = gpio_get(PIN_ENC_DT);
 
         // Detectar flanco y hacer antirrebote por tiempo
-        if (clk == 1 && last_clk_state == 0 && (now - last_clk_time) > 10000) {
+        if (clk == 1 && last_clk_state == 0 && (now - last_clk_time) > 15000) {
             last_clk_time = now;
 
             if (dt != clk) {
@@ -194,10 +194,10 @@ void mostrar_ultimos_setpoints(void) {
         memcpy(&dato, buffer, sizeof(dato));
 
         // Mostrar en LCD
-        snprintf(lcd_buffer.textoLCD[0], 20, "ID: %d Tipo: %d", dato.id, dato.tipo_dato);
-        snprintf(lcd_buffer.textoLCD[1], 20, "Valor: %.2f", dato.valor);
-        snprintf(lcd_buffer.textoLCD[2], 20, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
-        snprintf(lcd_buffer.textoLCD[3], 20, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
+        snprintf(lcd_buffer.textoLCD[0], 21, "ID: %d Tipo: %d", dato.id, dato.tipo_dato);
+        snprintf(lcd_buffer.textoLCD[1], 21, "Valor: %.2f", dato.valor);
+        snprintf(lcd_buffer.textoLCD[2], 21, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
+        snprintf(lcd_buffer.textoLCD[3], 21, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
 
         xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
         vTaskDelay(pdMS_TO_TICKS(2000));  // 2 segundos por pantalla
@@ -235,6 +235,42 @@ void actualizar_valor(int *valor, int max_val, int digit, bool incrementar) {
     }
 }
 
+bool check_limits(eeprom_data_id_t *id_Alarma, setpoint_data_t *setpoint, sensado_data_t *measurement) {
+    bool MAX_ON, MIN_ON;
+    MAX_ON = false; MIN_ON = false;
+
+    // Corriente
+    if (measurement->Iload_ma > setpoint->Imax) {
+        // Escribe en EEPROM
+        printf("ALERTA: Corriente supera Imax (%d mA)\n", setpoint->Imax);
+        // acá podés encender LED, cortar salida, etc.
+        MAX_ON = true;
+    } else if (measurement->Iload_ma < setpoint->Imin) {
+        // Escribe en EEPROM
+        printf("ALERTA: Corriente menor que Imin (%d mA)\n", setpoint->Imin);
+        MIN_ON = true;
+    } 
+
+    // Voltaje
+    if ((int)(measurement->Vin_v) > setpoint->Vmax) {
+        printf("ALERTA: Voltaje supera Vmax (%d mV)\n", setpoint->Vmax);
+        // Escribe en EEPROM
+        MAX_ON = true;
+    } else if ((int)(measurement->Vin_v) < setpoint->Vmin) {
+        // Escribe en EEPROM
+        printf("ALERTA: Voltaje menor que Vmin (%d mV)\n", setpoint->Vmin);
+        MIN_ON = true;
+    }
+
+    // Encendido LEDs
+    if (MAX_ON || MIN_ON){
+        if (MAX_ON) gpio_put(PIN_LED_MAX, 1); else gpio_put(PIN_LED_MAX, 0);
+        if (MIN_ON) gpio_put(PIN_LED_MIN, 1); else gpio_put(PIN_LED_MIN, 0);
+        return true;
+    } else{
+        return false;
+    }
+}
 
 
 /* 
@@ -260,6 +296,7 @@ void mostrar_dato_eeprom(uint16_t addr) {
     xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
 } */
 
+
 /*------------- TAREAS -------------*/
 
 void task_Control (void *pvParameters) {
@@ -268,13 +305,15 @@ void task_Control (void *pvParameters) {
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint;
     sensado_data_t measurement;
+    eeprom_data_t alarma_eeprom;
     lcd_data_t buffer_lcd;
+    //lcd_data_t lcd_msg;
     float dac_out;
     TickType_t last_lcd_update = 0;
     TickType_t last_res_update = 0;   // Control de tiempo para Sem_Resistencia
     TickType_t last_auxdac_update = 0;
-    lcd_data_t lcd_msg;
     
+    bool alerta = false;
     float valorM=0;
 
     while(1) {
@@ -294,6 +333,24 @@ void task_Control (void *pvParameters) {
                 I_target = 0;
             }
 
+            // ALERTAS - Si hay alerta guarda en EEPROM
+            if (check_limits (&alarma_eeprom.id, &setpoint_global, &measurement)){
+                if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    ds3231_get_datetime(&dt, &rtc);
+                    alarma_eeprom.timestamp = dt;
+                    xSemaphoreGive(Sem_I2C0_Mutex);
+                }
+                if (pantalla_actual==0 || pantalla_actual==2){
+                    alarma_eeprom.valor = (float)(*ptr_valores[pantalla_actual])/10.0f;
+                }else{
+                    alarma_eeprom.valor = (float)(*ptr_valores[pantalla_actual]);
+                }
+
+                // Guardar valor en EEPROM
+                xQueueSend(Queue_EEPROM, &alarma_eeprom, portMAX_DELAY);
+            }
+
+
             // Control PID
             float error = I_target - measurement.Iload_ma;
             pid_state.integral += error * pid.Ts;
@@ -302,22 +359,29 @@ void task_Control (void *pvParameters) {
             // Limitar salida (0-4095 para DAC de 12 bits)
             output = fmaxf(0, fminf(output, 4095.0f));
         
-            //Enviar valor DAC a cola
+            // Enviar valor DAC a cola
             dac_out = (output / 4095.0f) * 5.0f ;
             //xQueueSend(Queue_DAC, &dac_out, portMAX_DELAY);
-
             
             // Dar semáforo a task_Resistencia según tiempo configurado
             TickType_t now = xTaskGetTickCount();
             
             // ----------- AUXILIAR DE PRUEBA ---------------
-            if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
-                float valorM;
+            /* if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
+                
                 valorM = valorM + 0.5;
                 xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
                 if (valorM == 5) valorM=0;
                 last_auxdac_update = now;
             }
+ */
+            if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
+                valorM = 2.5;
+                xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
+                last_auxdac_update = now;
+            }
+            // -----------------------------------------------
+
 
             if ((now - last_res_update) >= pdMS_TO_TICKS(setpoint_global.tiempo_ms)) {
                 xSemaphoreGive(Sem_Bin_Resistencia);
@@ -326,11 +390,15 @@ void task_Control (void *pvParameters) {
 
             // Mostrar en pantalla los valores leidos
             if ((now - last_lcd_update) >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)) {
-                snprintf(buffer_lcd.textoLCD[0], 20, "Medicion en curso");
+            /*     snprintf(buffer_lcd.textoLCD[0], 20, "Medicion en curso");
                 snprintf(buffer_lcd.textoLCD[1], 20, "R: %d OHM", R_actual);
                 snprintf(buffer_lcd.textoLCD[2], 20, "V entrada: %0.2f V", measurement.Vin_v);
-                snprintf(buffer_lcd.textoLCD[3], 20, "Corriente: %3d mA", (int) measurement.Iload_ma);
-                
+                snprintf(buffer_lcd.textoLCD[3], 20, "Corriente: %3d mA", (int) measurement.Iload_ma); */
+                lcd_show_cursor(false,false);
+                snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
+                snprintf(buffer_lcd.textoLCD[1], 21, "R: %-6d OHM", R_actual);
+                snprintf(buffer_lcd.textoLCD[2], 21, "V entrada: %-5.2f V", measurement.Vin_v);
+                snprintf(buffer_lcd.textoLCD[3], 21, "Corriente: %-4d mA", (int)measurement.Iload_ma);
                 //lcd_clear();
                 xQueueSend(Queue_EscribirLCD, &buffer_lcd, 0);
                 last_lcd_update = now;
@@ -342,29 +410,7 @@ void task_Control (void *pvParameters) {
     }
 }
 
-void task_LCD (void *params) {
-    lcd_data_t data_print_LCD;
-    lcd_data_t prev_data = {0}; // Inicializo vacío
-    while (1) {
-        // Recibo colas con estructura
-        if (xQueueReceive(Queue_EscribirLCD, &data_print_LCD, portMAX_DELAY) == pdTRUE) {
-             
-            // Toma el mutex antes de escribir en I2C (LCD)
-            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                
-                for (int i = 0; i < 4; i++) {
-                    if (strncmp(prev_data.textoLCD[i], data_print_LCD.textoLCD[i], 20) != 0) {
-                        lcd_set_cursor(i, 0);
-                        lcd_string(data_print_LCD.textoLCD[i]);
-                        strncpy(prev_data.textoLCD[i], data_print_LCD.textoLCD[i], 20);
-                    }
-                }
-                xSemaphoreGive(Sem_I2C0_Mutex);  // ✅ Liberar el mutex
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(20)); // pequeña pausa para evitar saturar
-    }
-}
+
 
 /* void task_Sensado(void *pvParameters) {
     sensado_data_t lectura;
@@ -400,6 +446,8 @@ void task_Sensado(void *pvParameters) {
             voltage_shunt_sum = 0;
             voltage_in_sum = 0;
             
+            // Da semaforo apenas lo toma
+            xSemaphoreGive (Sem_Bin_ReadyToRead);
             // Toma múltiples muestras para promediar
             for(uint8_t i = 0; i < num_samples; i++) {
                 // Lee corriente (pin 31 - ADC0)
@@ -442,7 +490,7 @@ void task_Sensado(void *pvParameters) {
             
             // Delay para la frecuencia de muestreo deseada
             vTaskDelay(pdMS_TO_TICKS(10));
-            xSemaphoreGive (Sem_Bin_ReadyToRead);
+            
         }
     }
 }
@@ -506,284 +554,14 @@ void task_DAC(void *pvParameters) {
     }
 }
 
-/* void task_Config(void *params) {
-    char linea_aux[4][20];
-    lcd_data_t lcd_buffer;
-    int resistencia_idx = 0;       // de 0 a 9 (RESISTENCIA 1 a 10)
-    int V_max_mV = 0;              // Vmax en decenas de milivoltios (ej: 123 = 12.3V)
-    int I_max_mA = 0;
-    int V_min_mV = 0;              // Vmax en decenas de milivoltios (ej: 123 = 12.3V)
-    int I_min_mA = 0;
-    int tiempo_seg = 0;
-    int valores[10] = {0};         // cada resistencia tiene un valor (6 dígitos)
-    int digit_selected = 0;        // índice del dígito actual (0 = unidades, 5 = centenas de mil)
-    const int potencias[7] = {1, 10, 100, 1000, 10000, 100000, 1000000};
-
-    int pantalla_actual = 0;       // 0=Vmax, 1=Imax, 2=Vmin, 3=Imin, 4=Tiempo, 5–14 = resistencias 1–10
-    int total_parametros = 15;      //Cantidad de pantallas de parametros
-    int last_digit_selected = -1;
-    TickType_t last_press_time = 0;
-    bool pressed = false;
-    TickType_t last_cursor_time = 0;
-    bool cursor_visible = false;
-
-    eeprom_data_t dato_eeprom;
-    dato_eeprom.tipo_dato = EEPROM_DATA_SETPOINT;
-
-    while (1) {
-        
-        // Tomo semaforo de estado Configuracion
-        if (xSemaphoreTake(Sem_Bin_Config, portMAX_DELAY) == pdTRUE){
-
-            // Pausar Resistencia
-            xSemaphoreTake(Sem_Bin_Resistencia, (TickType_t) 0);
-
-            while (pantalla_actual < total_parametros){
-                int res_idx = pantalla_actual - 5;  // numero de resistencia a guardar
-                // --- Lógica de armado de pantallas ---
-                switch (pantalla_actual) {
-                    case 0:
-                        // Formateo manual V_max_mV a "XX.X V"
-                        snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG V MAX");
-                        snprintf(linea_aux[1], sizeof(linea_aux[1]), "%2d.%1d V", V_max_mV/10, V_max_mV%10);
-                        //linea_aux[2][0] = '\0';
-                        //linea_aux[3][0] = '\0';
-                        break;
-                        
-                    case 1:
-                        snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG I MAX");
-                        snprintf(linea_aux[1], sizeof(linea_aux[1]), "%03d mA", I_max_mA);
-                        //linea_aux[2][0] = '\0';
-                        //linea_aux[3][0] = '\0';
-                        break;
-
-                    case 2:
-                        // Formateo manual V_max_mV a "XX.X V"
-                        snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG V MIN");
-                        snprintf(linea_aux[1], sizeof(linea_aux[1]), "%2d.%1d V", V_min_mV/10, V_min_mV%10);
-                        //linea_aux[2][0] = '\0';
-                        //linea_aux[3][0] = '\0';
-                        break;
-
-                    case 3:
-                        snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG I MIN");
-                        snprintf(linea_aux[1], sizeof(linea_aux[1]), "%03d mA", I_min_mA);
-                        //linea_aux[2][0] = '\0';
-                        //linea_aux[3][0] = '\0';
-                        //snprintf(linea_aux[3], sizeof(linea_aux[3]), "PULSAR PARA OK");
-                        break;
-
-                    case 4:
-                        snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG TIEMPO");
-                        snprintf(linea_aux[1], sizeof(linea_aux[1]), "%03d seg", tiempo_seg);
-                        break;
-
-                    default:
-                        //int res_idx = pantalla_actual - 5;
-                        snprintf(linea_aux[0], sizeof(linea_aux[0]), "CONFIG  R%2d", res_idx + 1);
-                        snprintf(linea_aux[1], sizeof(linea_aux[1]), "%07d  OHM", valores[res_idx]);
-                        //linea_aux[2][0] = '\0';
-                        //linea_aux[3][0] = '\0';
-                        break;
-                }
-                linea_aux[2][0] = '\0';
-                linea_aux[3][0] = '\0';
-
-                // Copio todo a la estructura de LCD
-                for (int i=0;i<4;i++){
-                    snprintf(lcd_buffer.textoLCD[i], 20, "%-20s", linea_aux[i]);
-                }
-            
-                // Envío estructura con las 2 primeras líneas
-                xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
-
-
-                // Mover cursor físico al dígito seleccionado solo si cambió
-                if (digit_selected != last_digit_selected) {
-                    int col = 0;
-                    int row = 1;
-
-                    if (pantalla_actual == 0 || pantalla_actual == 2) // Vmax: XX.X
-                        col = 3 - 2 * digit_selected;  // 0 = décima, 2 = unidad
-                    else if (pantalla_actual == 1 || pantalla_actual == 3) // Imax: XXX
-                        col = 2 - digit_selected;  // 0 = unidades, 2 = centenares
-                    else if (pantalla_actual == 4) //
-                        col = 3 - digit_selected; 
-                    else
-                        col = 6 - digit_selected;  // Resistencia: 7 dígitos, de derecha a izquierda
-
-                    lcd_set_cursor(row, col);
-                    lcd_show_cursor(true, true);
-                    cursor_visible = true;
-                    last_cursor_time = xTaskGetTickCount();
-                    last_digit_selected = digit_selected;
-                }
-
-                // ==============================
-                // ▶ Giro horario = incrementar
-                if (xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE) {
-                    int factor = potencias[digit_selected];
-                    if (pantalla_actual == 0) {
-                        //int factor = potencias[digit_selected];
-                        V_max_mV += factor;
-                        if (V_max_mV > 120) V_max_mV = 120; // max 12.0 V  
-                    } else if (pantalla_actual == 1) {
-                        //int factor = potencias[digit_selected];
-                        I_max_mA += factor;
-                        if (I_max_mA > 250) I_max_mA = 250;
-                    } else if (pantalla_actual == 2) {
-                        //int factor = potencias[digit_selected];
-                        V_min_mV += factor;
-                        if (V_min_mV > 120) V_min_mV = 120; // max 12.0 V  
-                    } else if (pantalla_actual == 3) {
-                        //int factor = potencias[digit_selected];
-                        I_min_mA += factor;
-                        if (I_min_mA > 250) I_min_mA = 250;
-                    } else if (pantalla_actual == 4) {
-                        //int factor = potencias[digit_selected];
-                        tiempo_seg += factor;
-                        if (tiempo_seg > 120) tiempo_seg = 120; // 2 minutos
-                    } else {
-                        //int factor = potencias[digit_selected];
-                        valores[res_idx] += factor;
-                        if (valores[res_idx] > 9999999) valores[res_idx] = 9999999;
-                    }
-                }
-
-                // ◀ Giro antihorario = decrementar
-                if (xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE) {
-                    int factor = potencias[digit_selected];
-                    if (pantalla_actual == 0) {
-                        //int factor = potencias[digit_selected];
-                        V_max_mV -= factor;
-                        if (V_max_mV < 0) V_max_mV = 0;
-                    } else if (pantalla_actual == 1) {
-                        //int factor = potencias[digit_selected];
-                        I_max_mA -= factor;
-                        if (I_max_mA < 0) I_max_mA = 0;
-                    }else if (pantalla_actual == 2) {
-                        //int factor = potencias[digit_selected];
-                        V_min_mV -= factor;
-                        if (V_min_mV < 0) V_min_mV = 0; // max 12.0 V  
-                    } else if (pantalla_actual == 3) {
-                        //int factor = potencias[digit_selected];
-                        I_min_mA -= factor;
-                        if (I_min_mA < 0) I_min_mA = 0;
-                    } else if (pantalla_actual == 4) {
-                        //int factor = potencias[digit_selected];
-                        tiempo_seg -= factor;
-                        if (tiempo_seg < 0) tiempo_seg = 0; // 2 minutos
-                    } else {
-                        int factor = potencias[digit_selected];
-                        valores[res_idx] -= factor;
-                        if (valores[res_idx] < 0) valores[res_idx] = 0;
-                    }
-                }
-
-                // ==============================
-                // Pulsación del botón del encoder
-                if (gpio_get(PIN_ENC_SW) == 0 && !pressed) {
-                    pressed = true;
-                    last_press_time = xTaskGetTickCount();
-                }
-
-                // ----> Confirmo valor
-                if (gpio_get(PIN_ENC_SW) == 1 && pressed) {
-                    pressed = false;
-                    TickType_t elapsed = xTaskGetTickCount() - last_press_time;
-
-                    if (elapsed >= pdMS_TO_TICKS(1000)) {
-                        // Mantengo apretado, confirmo y paso al siguiente dato
-                        if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                            ds3231_get_datetime(&dt, &rtc);  // Obtener fecha/hora actual
-                            dato_eeprom.timestamp = dt;
-                            xSemaphoreGive(Sem_I2C0_Mutex);
-                        }
-
-                        switch (pantalla_actual) {
-                            case 0:
-                                dato_eeprom.id = ID_VMAX;
-                                dato_eeprom.valor = V_max_mV / 10.0f;
-                                break;
-                            case 1:
-                                dato_eeprom.id = ID_IMAX;
-                                dato_eeprom.valor = (float)I_max_mA;
-                                break;
-                            case 2:
-                                dato_eeprom.id = ID_VMIN;
-                                dato_eeprom.valor = V_min_mV / 10.0f;
-                                break;
-                            case 3:
-                                dato_eeprom.id = ID_IMIN;
-                                dato_eeprom.valor = (float)I_min_mA;
-                                break;
-                            case 4:
-                                dato_eeprom.id = ID_TIEMPO;
-                                dato_eeprom.valor = (float)tiempo_seg;
-                                break;
-                            default:
-                                dato_eeprom.id = ID_R1 + (pantalla_actual - 5);
-                                dato_eeprom.valor = (float)valores[pantalla_actual - 5];
-                                break;
-                        }
-
-                        // Mando cola para guardar el dato y espero un segundo
-                        xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
-                        vTaskDelay(pdMS_TO_TICKS(1500));
-
-                        // Si es el último parámetro, mostrar los 12 setpoints guardados
-                        if (pantalla_actual == 14) {
-                            snprintf(lcd_buffer.textoLCD[0], 20, "CONFIG GUARDADA");
-                            lcd_buffer.textoLCD[1][0] = '\0';
-                            lcd_buffer.textoLCD[2][0] = '\0';
-                            lcd_buffer.textoLCD[3][0] = '\0';
-                            xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
-                            vTaskDelay(pdMS_TO_TICKS(1000));
-                            //mostrar_ultimos_setpoints();
-                            // Set de variables globales
-                            setpoint_global.tiempo_ms = (uint32_t) tiempo_seg/1000;
-                            setpoint_global.Vmax = V_max_mV/10.0f;
-                            setpoint_global.Imax = (float)I_max_mA;
-                            setpoint_global.Vmin = V_min_mV/10.0f;
-                            setpoint_global.Imin = (float)I_min_mA;
-                            for (int i=0;i++;i<10){
-                                setpoint_global.R_setpoints[i] = (uint32_t) valores[i];
-                            }
-                            
-                            // Da semaforo para empezar a medir
-                            //xSemaphoreGive(Sem_Bin_ReadyToRead);
-                        }
-                        // Avanza al siguiente parámetro
-                        pantalla_actual = pantalla_actual + 1;
-                        digit_selected = 0;
-
-                    } else if (elapsed >= pdMS_TO_TICKS(100)) {
-                        if ((pantalla_actual == 0)||(pantalla_actual == 2))         digit_selected = (digit_selected + 1) % 2;
-                        else if ((pantalla_actual == 1)||(pantalla_actual == 3))    digit_selected = (digit_selected + 1) % 3;
-                        else if (pantalla_actual == 4)      digit_selected = (digit_selected + 1) % 3;
-                        else                                digit_selected = (digit_selected + 1) % 7;
-                    }
-                }
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            // Reanudar modo de ejecucion
-            xSemaphoreGive (Sem_Bin_Resistencia);
-            xSemaphoreGive (Sem_Bin_ReadyToRead);
-            pantalla_actual = 0;
-        }
-    }
-} */
-
-
-
 void task_Config(void *params) {
     int pantalla_actual = 0;
     int total_parametros = 15;
     int digit_selected = 0;
     int last_digit_selected = -1;
     bool pressed = false;
-    TickType_t last_cursor_time = 0;
     bool cursor_visible = false;
+    TickType_t last_cursor_time = 0;
     // Variables de cada parametro
     int V_max_mV=0, I_max_mA=0, V_min_mV=0, I_min_mA=0, tiempo_seg=0;
     int valores_res[NUM_RESISTENCIAS] = {0};
@@ -815,50 +593,63 @@ void task_Config(void *params) {
         if (xSemaphoreTake(Sem_Bin_Config, portMAX_DELAY) == pdTRUE){
             // Pausar MODO ACTIVO
             xSemaphoreTake(Sem_Bin_ReadyToRead, 0);
-            lcd_cursor_on();
-            lcd_cursor_blink_on();
 
             while(pantalla_actual < TOTAL_PANTALLAS){
-                char linea[4][20];
+                char linea[4][21];
 
                 // MUESTRA CONFIGURACION DEL PARAMETRO
                 if(pantalla_actual < 5){
+
+                        // 🔵 Encender LED según el parámetro que estoy editando
+                    if (pantalla_actual == 0 || pantalla_actual == 1) {
+                        gpio_put(PIN_LED_MAX, 1);
+                    }
+                    else if (pantalla_actual == 2 || pantalla_actual == 3) {
+                        gpio_put(PIN_LED_MIN, 1);
+                    }
+
                     // Linea 0
                     switch(pantalla_actual){
-                        case 0: snprintf(linea[0], 20, "CONFIG V MAX"); break;
-                        case 1: snprintf(linea[0], 20, "CONFIG I MAX"); break;
-                        case 2: snprintf(linea[0], 20, "CONFIG V MIN"); break;
-                        case 3: snprintf(linea[0], 20, "CONFIG I MIN"); break;
-                        case 4: snprintf(linea[0], 20, "CONFIG TIEMPO"); break;
+                        case 0: snprintf(linea[0], 21, "CONFIG V MAX"); break;
+                        case 1: snprintf(linea[0], 21, "CONFIG I MAX"); break;
+                        case 2: snprintf(linea[0], 21, "CONFIG V MIN"); break;
+                        case 3: snprintf(linea[0], 21, "CONFIG I MIN"); break;
+                        case 4: snprintf(linea[0], 21, "CONFIG TIEMPO"); break;
                     }
                     // Linea 1
                     if(pantalla_actual==0 || pantalla_actual==2)
-                        snprintf(linea[1], 20, "%2d.%1d V", *ptr_valores[pantalla_actual]/10, *ptr_valores[pantalla_actual]%10);
+                        snprintf(linea[1], 21, "%2d.%1d V", *ptr_valores[pantalla_actual]/10, *ptr_valores[pantalla_actual]%10);
                     else if(pantalla_actual==1 || pantalla_actual==3)
-                        snprintf(linea[1], 20, "%03d mA", *ptr_valores[pantalla_actual]);
+                        snprintf(linea[1], 21, "%03d mA", *ptr_valores[pantalla_actual]);
                     else
-                        snprintf(linea[1], 20, "%03d seg", *ptr_valores[pantalla_actual]);
+                        snprintf(linea[1], 21, "%03d seg", *ptr_valores[pantalla_actual]);
                 } 
                 else {
                     int res_idx = pantalla_actual - 5;
-                    snprintf(linea[0], 20, "CONFIG R%2d", res_idx + 1);
-                    snprintf(linea[1], 20, "%07d OHM", *ptr_valores[pantalla_actual]);
+                    snprintf(linea[0], 21, "CONFIG R%2d", res_idx + 1);
+                    snprintf(linea[1], 21, "%07d OHM", *ptr_valores[pantalla_actual]);
                 }
                 // Linea 2 y 3
                 linea[2][0] = '\0';
                 linea[3][0] = '\0';
 
-                for(int i=0; i<4; i++)     snprintf(lcd_buffer.textoLCD[i], 20, "%-20s", linea[i]);
+                for(int i=0; i<4; i++)     snprintf(lcd_buffer.textoLCD[i], 21, "%-20s", linea[i]);
                 // Envío a imprimir el parametro actual
                 xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
 
-
-                // -- CURSOR --
-                if(digit_selected != last_digit_selected){
+                // volver a ubicar cursor si corresponde
+                if(cursor_visible){
                     int col = columna_cursor(pantalla_actual, digit_selected);
                     lcd_set_cursor(1, col);
-                    lcd_show_cursor(true,true);
+                    lcd_show_cursor(true, true);
+                }
+
+                // -- CURSOR --
+                if(cursor_visible && digit_selected != last_digit_selected){
+                    int col = columna_cursor(pantalla_actual, digit_selected);
+                    lcd_set_cursor(1, col);
                     last_cursor_time = xTaskGetTickCount();
+                    lcd_show_cursor(true,true);   // solo ON si estaba en modo visible
                     last_digit_selected = digit_selected;
                 }
 
@@ -899,6 +690,10 @@ void task_Config(void *params) {
                         xQueueSend(Queue_EEPROM, &dato_eeprom, portMAX_DELAY);
                         vTaskDelay(pdMS_TO_TICKS(2000));
 
+                        // Apaga LEDs
+                        gpio_put(PIN_LED_MAX, 0);
+                        gpio_put(PIN_LED_MIN, 0);
+
                         pantalla_actual++;
                         digit_selected = 0;
                         last_digit_selected = -1;
@@ -910,7 +705,11 @@ void task_Config(void *params) {
                         if ((pantalla_actual==0)||(pantalla_actual==2)) digit_selected=(digit_selected+1)%2;
                         else if ((pantalla_actual==1)||(pantalla_actual==3)) digit_selected=(digit_selected+1)%3;
                         else if (pantalla_actual==4) digit_selected=(digit_selected+1)%3;
-                        else digit_selected=(digit_selected+1)% num_digitos_resistencia ;
+                        else digit_selected=(digit_selected+1)% num_digitos_resistencia;
+
+                        lcd_show_cursor(true, true);
+                        cursor_visible = true;
+                        last_digit_selected = -1; // forzar reubicación del cursor
                     }
                 }
 
@@ -929,13 +728,13 @@ void task_Config(void *params) {
 
             // Mensaje de CONFIG GUARDADA
             lcd_clear();
-            snprintf(lcd_buffer.textoLCD[0],20,"CONFIG GUARDADA");
+            snprintf(lcd_buffer.textoLCD[0],21,"CONFIG GUARDADA");
             for(int i=1;i<4;i++)    lcd_buffer.textoLCD[i][0]='\0';
             xQueueSend(Queue_EscribirLCD,&lcd_buffer,portMAX_DELAY);
             vTaskDelay(pdMS_TO_TICKS(2000));
             
             pantalla_actual=0;
-            lcd_cursor_off();
+            lcd_show_cursor(false,false);
             // Sale de MODO CONFIGURACION
             xSemaphoreGive(Sem_Bin_ReadyToRead);
         }
@@ -1003,17 +802,17 @@ void task_Config(void *params) {
             memcpy(&dato, buffer_lectura, sizeof(dato));
 
             // Armar el contenido a mostrar
-            snprintf(lcd_text.textoLCD[0], 20, "GUARDADO - ID: %d  ", dato.id, dato.tipo_dato);
+            snprintf(lcd_text.textoLCD[0], 21, "GUARDADO - ID: %d  ", dato.id, dato.tipo_dato);
             switch (dato.id){            
-                case 0:     snprintf(lcd_text.textoLCD[1], 20, "Valor: %.1f V", dato.valor); break;
-                case 1:     snprintf(lcd_text.textoLCD[1], 20, "Valor: %d mA", (int)dato.valor); break;
-                case 2:     snprintf(lcd_text.textoLCD[1], 20, "Valor: %.1f V", dato.valor); break;
-                case 3:     snprintf(lcd_text.textoLCD[1], 20, "Valor: %d mA", (int)dato.valor); break;
-                case 4:     snprintf(lcd_text.textoLCD[1], 20, "Valor: %d seg", (int)dato.valor); break;
-                default:    snprintf(lcd_text.textoLCD[1], 20, "Valor: %d OHM", (int)dato.valor); break;
+                case 0:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
+                case 1:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
+                case 2:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
+                case 3:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
+                case 4:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d seg", (int)dato.valor); break;
+                default:    snprintf(lcd_text.textoLCD[1], 21, "Valor: %d OHM", (int)dato.valor); break;
             }
-            snprintf(lcd_text.textoLCD[2], 20, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
-            snprintf(lcd_text.textoLCD[3], 20, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
+            snprintf(lcd_text.textoLCD[2], 21, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
+            snprintf(lcd_text.textoLCD[3], 21, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
             
             // Muestro parametro guardado en EEPROM
             xQueueSend(Queue_EscribirLCD, &lcd_text, portMAX_DELAY);
@@ -1021,6 +820,29 @@ void task_Config(void *params) {
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void task_LCD (void *params) {
+    lcd_data_t data_print_LCD;
+    lcd_data_t prev_data = {0}; // Inicializo vacío
+    while (1) {
+        // Recibo colas con estructura
+        if (xQueueReceive(Queue_EscribirLCD, &data_print_LCD, portMAX_DELAY) == pdTRUE) {
+             
+            // Toma el mutex antes de escribir en I2C (LCD)
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                for (int i = 0; i < 4; i++) {
+                    if (strncmp(prev_data.textoLCD[i], data_print_LCD.textoLCD[i], 21) != 0) {
+                        lcd_set_cursor(i, 0);
+                        lcd_string(data_print_LCD.textoLCD[i]);
+                        strncpy(prev_data.textoLCD[i], data_print_LCD.textoLCD[i], 21);
+                    }
+                }
+                xSemaphoreGive(Sem_I2C0_Mutex);  // ✅ Liberar el mutex
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20)); // pequeña pausa para evitar saturar
     }
 }
 
@@ -1130,8 +952,19 @@ void task_Init(void *params) {
     Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
 
     // Ingresa en modo Config
-    xSemaphoreGive(Sem_Bin_Config);
+    //xSemaphoreGive(Sem_Bin_Config);
 
+    // Setpoint de ejemplo
+    setpoint_global.Vmax = 11;
+    setpoint_global.Imax = 250;
+    setpoint_global.Vmin = 1;
+    setpoint_global.Imin = 1;
+    setpoint_global.tiempo_ms = 5000;
+    setpoint_global.R_setpoints[0] = 100;
+    setpoint_global.R_setpoints[1] = 300;
+    setpoint_global.R_setpoints[2] = 500;
+
+    xSemaphoreGive(Sem_Bin_ReadyToRead);
     // Elimino la tarea para liberar recursos
     vTaskDelete(NULL);
 }
