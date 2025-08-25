@@ -235,41 +235,18 @@ void actualizar_valor(int *valor, int max_val, int digit, bool incrementar) {
     }
 }
 
-bool check_limits(eeprom_data_id_t *id_Alarma, setpoint_data_t *setpoint, sensado_data_t *measurement) {
-    bool MAX_ON, MIN_ON;
-    MAX_ON = false; MIN_ON = false;
+// Funcion para limites MAX y MIN
+alarma_flag_t  check_limits (setpoint_data_t *setpoint, sensado_data_t *measurement, sensado_data_t *alarma_measurement) {
+    alarma_flag_t alarma = ALARMA_NONE;
 
-    // Corriente
-    if (measurement->Iload_ma > setpoint->Imax) {
-        // Escribe en EEPROM
-        printf("ALERTA: Corriente supera Imax (%d mA)\n", setpoint->Imax);
-        // acá podés encender LED, cortar salida, etc.
-        MAX_ON = true;
-    } else if (measurement->Iload_ma < setpoint->Imin) {
-        // Escribe en EEPROM
-        printf("ALERTA: Corriente menor que Imin (%d mA)\n", setpoint->Imin);
-        MIN_ON = true;
-    } 
+    // Set alarmas
+    if (measurement->Vin_v > setpoint->Vmax)        alarma |= ALARMA_VMAX; 
+    if (measurement->Vin_v < setpoint->Vmin)        alarma |= ALARMA_VMIN;
+    if (measurement->Iload_ma > setpoint->Imax)     alarma |= ALARMA_IMAX;
+    if (measurement->Iload_ma < setpoint->Imin)     alarma |= ALARMA_IMIN;
 
-    // Voltaje
-    if ((int)(measurement->Vin_v) > setpoint->Vmax) {
-        printf("ALERTA: Voltaje supera Vmax (%d mV)\n", setpoint->Vmax);
-        // Escribe en EEPROM
-        MAX_ON = true;
-    } else if ((int)(measurement->Vin_v) < setpoint->Vmin) {
-        // Escribe en EEPROM
-        printf("ALERTA: Voltaje menor que Vmin (%d mV)\n", setpoint->Vmin);
-        MIN_ON = true;
-    }
-
-    // Encendido LEDs
-    if (MAX_ON || MIN_ON){
-        if (MAX_ON) gpio_put(PIN_LED_MAX, 1); else gpio_put(PIN_LED_MAX, 0);
-        if (MIN_ON) gpio_put(PIN_LED_MIN, 1); else gpio_put(PIN_LED_MIN, 0);
-        return true;
-    } else{
-        return false;
-    }
+    *alarma_measurement=*measurement;
+    return alarma;
 }
 
 
@@ -304,14 +281,15 @@ void task_Control (void *pvParameters) {
     pid_params_t pid = { .Kp = 0.5f, .Ki = 0.1f, .Kd = 0.05f, .Ts = 0.01f };
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint;
-    sensado_data_t measurement;
+    sensado_data_t measurement, alarma_measurement;
     eeprom_data_t alarma_eeprom;
     lcd_data_t buffer_lcd;
-    //lcd_data_t lcd_msg;
+    alarma_flag_t alarma_flags;
     float dac_out;
     TickType_t last_lcd_update = 0;
     TickType_t last_res_update = 0;   // Control de tiempo para Sem_Resistencia
     TickType_t last_auxdac_update = 0;
+    TickType_t last_alarmaeeprom_update = 0;
     
     bool alerta = false;
     float valorM=0;
@@ -333,23 +311,7 @@ void task_Control (void *pvParameters) {
                 I_target = 0;
             }
 
-            // ALERTAS - Si hay alerta guarda en EEPROM
-            if (check_limits (&alarma_eeprom.id, &setpoint_global, &measurement)){
-                if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    ds3231_get_datetime(&dt, &rtc);
-                    alarma_eeprom.timestamp = dt;
-                    xSemaphoreGive(Sem_I2C0_Mutex);
-                }
-                if (pantalla_actual==0 || pantalla_actual==2){
-                    alarma_eeprom.valor = (float)(*ptr_valores[pantalla_actual])/10.0f;
-                }else{
-                    alarma_eeprom.valor = (float)(*ptr_valores[pantalla_actual]);
-                }
-
-                // Guardar valor en EEPROM
-                xQueueSend(Queue_EEPROM, &alarma_eeprom, portMAX_DELAY);
-            }
-
+        
 
             // Control PID
             float error = I_target - measurement.Iload_ma;
@@ -366,6 +328,7 @@ void task_Control (void *pvParameters) {
             // Dar semáforo a task_Resistencia según tiempo configurado
             TickType_t now = xTaskGetTickCount();
             
+
             // ----------- AUXILIAR DE PRUEBA ---------------
             /* if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
                 
@@ -382,18 +345,51 @@ void task_Control (void *pvParameters) {
             }
             // -----------------------------------------------
 
-
             if ((now - last_res_update) >= pdMS_TO_TICKS(setpoint_global.tiempo_ms)) {
                 xSemaphoreGive(Sem_Bin_Resistencia);
                 last_res_update = now;
             }
 
+            // ------------- ALARMAS - Si hay alerta guarda en EEPROM --------------
+            alarma_flags = check_limits(&setpoint, &measurement, &alarma_measurement);
+
+            // Encendido LEDs
+            gpio_put(PIN_LED_MAX, (alarma_flags & (ALARMA_VMAX | ALARMA_IMAX)) != 0);
+            gpio_put(PIN_LED_MIN, (alarma_flags & (ALARMA_VMIN | ALARMA_IMIN)) != 0);
+
+            if (alarma_flags && (now - last_alarmaeeprom_update) >= pdMS_TO_TICKS(3000)) {
+                alarma_eeprom.tipo_dato = EEPROM_DATA_ALARMA;
+
+                if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    ds3231_get_datetime(&dt, &rtc);
+                    alarma_eeprom.timestamp = dt;
+                    xSemaphoreGive(Sem_I2C0_Mutex);
+                }
+            
+                // Manda todas las alarmas
+                if (alarma_flags & ALARMA_VMAX) { 
+                    alarma_eeprom.id = ID_VMAX; 
+                    alarma_eeprom.valor = alarma_measurement.Vin_v; 
+                    xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
+                if (alarma_flags & ALARMA_VMIN) { 
+                    alarma_eeprom.id = ID_VMIN; 
+                    alarma_eeprom.valor = alarma_measurement.Vin_v; 
+                    xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
+                if (alarma_flags & ALARMA_IMAX) { 
+                    alarma_eeprom.id = ID_IMAX; 
+                    alarma_eeprom.valor = alarma_measurement.Iload_ma; 
+                    xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
+                if (alarma_flags & ALARMA_IMIN) { 
+                    alarma_eeprom.id = ID_IMIN; 
+                    alarma_eeprom.valor = alarma_measurement.Iload_ma; 
+                    xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
+
+                last_alarmaeeprom_update = now;
+            }
+            
+
             // Mostrar en pantalla los valores leidos
-            if ((now - last_lcd_update) >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)) {
-            /*     snprintf(buffer_lcd.textoLCD[0], 20, "Medicion en curso");
-                snprintf(buffer_lcd.textoLCD[1], 20, "R: %d OHM", R_actual);
-                snprintf(buffer_lcd.textoLCD[2], 20, "V entrada: %0.2f V", measurement.Vin_v);
-                snprintf(buffer_lcd.textoLCD[3], 20, "Corriente: %3d mA", (int) measurement.Iload_ma); */
+            if ((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS) && (now - last_alarmaeeprom_update)  >= pdMS_TO_TICKS(1000)) {
                 lcd_show_cursor(false,false);
                 snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
                 snprintf(buffer_lcd.textoLCD[1], 21, "R: %-6d OHM", R_actual);
@@ -475,7 +471,8 @@ void task_Sensado(void *pvParameters) {
             measurement.Iload_ma = (voltage_shunt / SHUNT_RESISTANCE) * 1000.0f; // A -> mA
 
             // Aplica resolución de 0.1 mA
-            measurement.Iload_ma = roundf(measurement.Iload_ma * 10) / 10.0f;
+            //measurement.Iload_ma = roundf(measurement.Iload_ma * 10) / 10.0f;
+
             
             // Convertir tensión:
             // ADC de 12 bits (0-4095) para 0-3.3V
@@ -483,7 +480,7 @@ void task_Sensado(void *pvParameters) {
             measurement.Vin_v = voltage_sensor * VOLTAGE_SCALE_FACTOR;
             
             // Aplica resolución de 0.1 V
-            measurement.Vin_v = roundf(measurement.Vin_v * 10) / 10.0f;
+            //measurement.Vin_v = roundf(measurement.Vin_v * 10) / 10.0f;
             
             // Envia por la cola
             xQueueSend(Queue_Sensado, &measurement, portMAX_DELAY);
@@ -750,7 +747,6 @@ void task_Config(void *params) {
     static uint16_t addr_lecturas  = EEPROM_ADDR_LECTURAS;
 
     while (1) {
-        //ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)); // Si no llega nada en 5s, se desbloquea
         if (xQueueReceive(Queue_EEPROM, &dato, portMAX_DELAY) == pdTRUE) {
             uint8_t buffer[sizeof(eeprom_data_t)];
             uint8_t buffer_lectura[sizeof(eeprom_data_t)];
@@ -802,19 +798,32 @@ void task_Config(void *params) {
             memcpy(&dato, buffer_lectura, sizeof(dato));
 
             // Armar el contenido a mostrar
-            snprintf(lcd_text.textoLCD[0], 21, "GUARDADO - ID: %d  ", dato.id, dato.tipo_dato);
-            switch (dato.id){            
-                case 0:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
-                case 1:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
-                case 2:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
-                case 3:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
-                case 4:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d seg", (int)dato.valor); break;
-                default:    snprintf(lcd_text.textoLCD[1], 21, "Valor: %d OHM", (int)dato.valor); break;
+            if (dato.tipo_dato == EEPROM_DATA_SETPOINT){
+                snprintf(lcd_text.textoLCD[0], 21, "GUARDADO - ID: %d  ", dato.id, dato.tipo_dato);
+                switch (dato.id){            
+                    case 0:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
+                    case 1:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
+                    case 2:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
+                    case 3:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
+                    case 4:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d seg", (int)dato.valor); break;
+                    default:    snprintf(lcd_text.textoLCD[1], 21, "Valor: %d OHM", (int)dato.valor); break;
+                }
+            } else if (dato.tipo_dato == EEPROM_DATA_ALARMA)
+            {
+                snprintf(lcd_text.textoLCD[0], 21, "%-20s", "ALARMA");
+                switch (dato.id){
+                    case 0:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
+                    case 1:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
+                    case 2:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %.1f V", dato.valor); break;
+                    case 3:     snprintf(lcd_text.textoLCD[1], 21, "Valor: %d mA", (int)dato.valor); break;
+                }
             }
+            
             snprintf(lcd_text.textoLCD[2], 21, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
             snprintf(lcd_text.textoLCD[3], 21, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
             
             // Muestro parametro guardado en EEPROM
+            lcd_clear();
             xQueueSend(Queue_EscribirLCD, &lcd_text, portMAX_DELAY);
 
         }
@@ -839,7 +848,7 @@ void task_LCD (void *params) {
                         strncpy(prev_data.textoLCD[i], data_print_LCD.textoLCD[i], 21);
                     }
                 }
-                xSemaphoreGive(Sem_I2C0_Mutex);  // ✅ Liberar el mutex
+                xSemaphoreGive(Sem_I2C0_Mutex);  // Liberar el mutex
             }
         }
         vTaskDelay(pdMS_TO_TICKS(20)); // pequeña pausa para evitar saturar
@@ -955,10 +964,10 @@ void task_Init(void *params) {
     //xSemaphoreGive(Sem_Bin_Config);
 
     // Setpoint de ejemplo
-    setpoint_global.Vmax = 11;
+    setpoint_global.Vmax = 12;
     setpoint_global.Imax = 250;
-    setpoint_global.Vmin = 1;
-    setpoint_global.Imin = 1;
+    setpoint_global.Vmin = 3;
+    setpoint_global.Imin = 0;
     setpoint_global.tiempo_ms = 5000;
     setpoint_global.R_setpoints[0] = 100;
     setpoint_global.R_setpoints[1] = 300;
