@@ -339,7 +339,7 @@ void task_Control (void *pvParameters) {
             }
  */
             if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
-                valorM = 2.5;
+                valorM = 1;
                 xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
                 last_auxdac_update = now;
             }
@@ -351,7 +351,7 @@ void task_Control (void *pvParameters) {
             }
 
             // ------------- ALARMAS - Si hay alerta guarda en EEPROM --------------
-            alarma_flags = check_limits(&setpoint, &measurement, &alarma_measurement);
+            /* alarma_flags = check_limits(&setpoint, &measurement, &alarma_measurement);
 
             // Encendido LEDs
             gpio_put(PIN_LED_MAX, (alarma_flags & (ALARMA_VMAX | ALARMA_IMAX)) != 0);
@@ -386,10 +386,11 @@ void task_Control (void *pvParameters) {
 
                 last_alarmaeeprom_update = now;
             }
-            
+             */
 
             // Mostrar en pantalla los valores leidos
-            if ((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS) && (now - last_alarmaeeprom_update)  >= pdMS_TO_TICKS(1000)) {
+            //if ((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS) && (now - last_alarmaeeprom_update)  >= pdMS_TO_TICKS(1000)) {
+            if ((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)){
                 lcd_show_cursor(false,false);
                 snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
                 snprintf(buffer_lcd.textoLCD[1], 21, "R: %-6d OHM", R_actual);
@@ -466,7 +467,7 @@ void task_Sensado(void *pvParameters) {
             // Convertir corriente:
             // ADC de 12 bits (0-4095) para 0-3.3V
             // Voltaje en shunt: V = I*R = 0.25A * 10Ω = 2.5V
-            float voltage_shunt = (voltage_shunt_raw  * 3.3f) / 4095.0f; // Ajuste por tensiones en ADC 
+            float voltage_shunt = (voltage_shunt_raw  * 2.5f) / 4095.0f; // Ajuste por tensiones en ADC 
             measurement.Vshunt_v = voltage_shunt;
             measurement.Iload_ma = (voltage_shunt / SHUNT_RESISTANCE) * 1000.0f; // A -> mA
 
@@ -476,8 +477,10 @@ void task_Sensado(void *pvParameters) {
             
             // Convertir tensión:
             // ADC de 12 bits (0-4095) para 0-3.3V
-            float voltage_sensor = (voltage_raw * 3.3f) / 4095.0f;
-            measurement.Vin_v = voltage_sensor * VOLTAGE_SCALE_FACTOR;
+            //float voltage_sensor = (voltage_raw * 12.0f) / 4095.0f;
+            float voltage_sensor = (voltage_raw * 12.0f) / ((2.25F/3.3f)*4095.0f);
+            measurement.Vin_v = voltage_sensor;
+            //measurement.Vin_v = voltage_sensor * VOLTAGE_SCALE_FACTOR;
             
             // Aplica resolución de 0.1 V
             //measurement.Vin_v = roundf(measurement.Vin_v * 10) / 10.0f;
