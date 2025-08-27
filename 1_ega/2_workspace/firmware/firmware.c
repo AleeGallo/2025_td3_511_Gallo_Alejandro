@@ -51,7 +51,7 @@
 #define MAX_I_mA_Value   250
 #define MAX_V_mV_Value   120       // 12.0 V max
 #define MAX_tiempo_mS_Value 120    // 2 minutos maximo
-#define MAX_Resistencia_Value 9999999
+#define MAX_Resistencia_Value 9999
 
 #define TIEMPO_REFRESH_LCD_MS  500  // Tiempo de refresco de LCD en MODO ACTIVO
 
@@ -68,14 +68,6 @@ static bool last_config_state = 1;  // Se asume que el botón está en reposo (p
 ds3231_rtc_t rtc;       // Variable global del RTC
 ds3231_datetime_t dt;   // Datetime global del RTC
 mcp4725_t dac;
-
-// Valores de resistencias configurados
-
-//uint32_t R_setpoints[10] = {0};  // R1...R10
-
-
-// Tiempo de cambio entre resistencias (ms)
-//uint32_t tiempo_cambio_ms = 1000; // valor por defecto, se sobreescribe al leer la configuración
 
 // Índice y valor de la resistencia actual
 volatile uint8_t indice_R_actual = 0;
@@ -183,7 +175,7 @@ void gpio_callback(uint gpio, uint32_t events) {
 }
 
 
-/*--------------FUNCIONES------------*/
+/*-------------------FUNCIONES------------------*/
 
 void mostrar_ultimos_setpoints(void) {
     lcd_data_t lcd_buffer;
@@ -213,7 +205,7 @@ int columna_cursor(int pantalla_actual, int digit_selected) {
     if (pantalla_actual == 0 || pantalla_actual == 2) return 3 - 2*digit_selected;      // Vmax/Vmin XX.X
     if (pantalla_actual == 1 || pantalla_actual == 3) return 2 - digit_selected;        // Imax/Imin XXX
     if (pantalla_actual == 4) return 2 - digit_selected;                                // Tiempo XXX
-    return 6 - digit_selected;                                                          // Resistencias 7 dígitos
+    return 3 - digit_selected;                                                          // Resistencias 7 dígitos
 }
 
 
@@ -224,7 +216,6 @@ void actualizar_valor(int *valor, int max_val, int digit, bool incrementar) {
     // MAX_VAL es el valor maximo para ese parametro
     // DIGIT es el digito que se aumenta o decrementa
     // INCREMENTAR es booleano
-
     int factor = 1;
     for(int i = 0; i < digit; i++) factor *= 10;
 
@@ -252,31 +243,8 @@ alarma_flag_t  check_limits (setpoint_data_t *setpoint, sensado_data_t *measurem
 }
 
 
-/* 
-void mostrar_dato_eeprom(uint16_t addr) {
-    lcd_data_t lcd_buffer;
-    eeprom_data_t dato;
-    uint8_t buffer[sizeof(eeprom_data_t)];
 
-    // Leer dato desde EEPROM
-    if (xSemaphoreTake(Sem_I2C0_Mutex, portMAX_DELAY) == pdTRUE) {
-        eeprom_read_data(i2c_default, addr, buffer, sizeof(buffer));
-        xSemaphoreGive(Sem_I2C0_Mutex); // Liberar el mutex
-    } 
-    memcpy(&dato, buffer, sizeof(dato));
-
-    // Preparar texto para LCD
-    snprintf(lcd_buffer.textoLCD[0], 20, "ID: %d Tipo: %d", dato.id, dato.tipo_dato);
-    snprintf(lcd_buffer.textoLCD[1], 20, "Valor: %.2f", dato.valor);
-    snprintf(lcd_buffer.textoLCD[2], 20, "%02d/%02d/%04d", dato.timestamp.day, dato.timestamp.month, dato.timestamp.year);
-    snprintf(lcd_buffer.textoLCD[3], 20, "%02d:%02d:%02d", dato.timestamp.hour, dato.timestamp.minutes, dato.timestamp.seconds);
-
-    // Enviar a cola para mostrar en LCD
-    xQueueSend(Queue_EscribirLCD, &lcd_buffer, portMAX_DELAY);
-} */
-
-
-/*------------- TAREAS -------------*/
+/*------------------- TAREAS ---------------------*/
 
 void task_Control (void *pvParameters) {
     
@@ -299,17 +267,19 @@ void task_Control (void *pvParameters) {
     float valorM=0;
 
     while(1) {
-        /*  if(xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE)
+        /*  ----------- Ajustes PID --------------
+        
+        if(xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE)
             pid.Kp = pid.Kp + 0.01;
         if(xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE)
-            pid.Kp = pid.Kp - 0.01; */
+            pid.Kp = pid.Kp - 0.01; 
 
-        /* if(xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE)
+        if(xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE)
             pid.Ki = pid.Ki + 0.02;
         if(xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE)
             pid.Ki = pid.Ki - 0.02;   */
 
-        // Esperar nueva medición (bloqueante)
+        // Esperar nueva medición
         if(xQueueReceive(Queue_Sensado, &measurement, 0) == pdTRUE) {
             // Calcular corriente deseada: I = V_max / R
             float I_target;
@@ -327,54 +297,34 @@ void task_Control (void *pvParameters) {
             float u_unsat = pid.Kp*error + pid.Ki*pid_state.integral; // previo a saturar
             float output = u_unsat;  // se saturará más abajo
 
-            // --- ANTI-WINDUP CONDICIONAL ---
+            // Anti-windup condicional
             bool saturado_arriba = (u_unsat > 5.0f);
             bool saturado_abajo  = (u_unsat < 0.0f);
 
-            // Integro solo si:
-            // - no estoy saturado o
-            // - estoy saturado pero el error empuja hacia adentro
+            // Integro solo si no esta saturado o error lleva hacia adentro
             if (!( (saturado_arriba && error > 0.0f) || (saturado_abajo && error < 0.0f) )) {
                 pid_state.integral += error * pid.Ts;
             }
 
-
+            // Limitante integral
             if (pid_state.integral > 5.00f) pid_state.integral = 5.00f;
             if (pid_state.integral < -5.00f) pid_state.integral = -5.00f;
 
+            // Calculo sistema PI
             output =  pid.Kp * error + pid.Ki * pid_state.integral;
             
             pid_state.prev_error = error;                
-            // Limitar salida (0-4095 para DAC de 12 bits)
-            // output = fmaxf(0, fminf(output, 4095.0f));
-            
+            // Limito señal DAC
             if (output < 0.0f) output = 0.0f;
             if (output > 5.0f) output = 5.0f;
             // Enviar valor DAC a cola
-            dac_out = output;   // Porque el valor maximo es 250mA y quiero que salga en tension
-            //dac_out = I_target * 20.0f;
+            dac_out = output;
             xQueueSend(Queue_DAC, &dac_out, portMAX_DELAY);
             
-            // Dar semáforo a task_Resistencia según tiempo configurado
-            TickType_t now = xTaskGetTickCount();
             
+            TickType_t now = xTaskGetTickCount();
 
-            // ----------- AUXILIAR DE PRUEBA ---------------
-            /* if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
-                
-                valorM = valorM + 0.5;
-                xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
-                if (valorM == 5) valorM=0;
-                last_auxdac_update = now;
-            }
- */
-            /* if ((now - last_auxdac_update) >= pdMS_TO_TICKS(2000)) {
-                valorM = 1;
-                xQueueSend(Queue_DAC, &valorM, portMAX_DELAY);
-                last_auxdac_update = now;
-            } */
-            // -----------------------------------------------
-
+            // Dar semáforo a task_Resistencia según tiempo configurado
             if ((now - last_res_update) >= pdMS_TO_TICKS(setpoint_global.tiempo_ms)) {
                 xSemaphoreGive(Sem_Bin_Resistencia);
                 last_res_update = now;
@@ -408,13 +358,13 @@ void task_Control (void *pvParameters) {
                             alarma_eeprom.id = ID_VMAX; 
                             alarma_eeprom.valor = alarma_measurement.Vin_v; 
                             xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
-                        if (alarma_flags & ALARMA_VMIN) { 
-                            alarma_eeprom.id = ID_VMIN; 
-                            alarma_eeprom.valor = alarma_measurement.Vin_v; 
-                            xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
                         if (alarma_flags & ALARMA_IMAX) { 
                             alarma_eeprom.id = ID_IMAX; 
                             alarma_eeprom.valor = alarma_measurement.Iload_ma; 
+                            xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
+                        if (alarma_flags & ALARMA_VMIN) { 
+                            alarma_eeprom.id = ID_VMIN; 
+                            alarma_eeprom.valor = alarma_measurement.Vin_v; 
                             xQueueSend(Queue_EEPROM, &alarma_eeprom, 0); }
                         if (alarma_flags & ALARMA_IMIN) { 
                             alarma_eeprom.id = ID_IMIN; 
@@ -428,13 +378,8 @@ void task_Control (void *pvParameters) {
                 alarma_timer = 0; // resetea el timer si no hay alarma
             }
 
-
-            
-            
-
-            // Mostrar en pantalla los valores leidos
+            // -------- LCD - Medicion en curso -----------
             if (((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)) && ((now - last_alarmaeeprom_update)  >= pdMS_TO_TICKS(1000))) {
-            //if ((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)){
                 lcd_show_cursor(false,false);
                 snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
                 snprintf(buffer_lcd.textoLCD[1], 21, "R: %-4d OHM   ", R_actual);
@@ -447,7 +392,8 @@ void task_Control (void *pvParameters) {
 
         }
         
-        vTaskDelay(pdMS_TO_TICKS(1)); // 1ms de periodo
+        // Frecuencia de calculo -> 1ms -> 1KHz
+        vTaskDelay(pdMS_TO_TICKS(1)); 
     }
 }
 
@@ -482,18 +428,15 @@ void task_Sensado(void *pvParameters) {
             uint16_t voltage_shunt_raw = voltage_shunt_sum / num_samples;
             uint16_t voltage_raw = voltage_in_sum / num_samples;
             
-            // Convierte valores ADC a valores reale
+            // --- CONVERSION ---
             
-            // Convertir corriente:
-            // ADC de 12 bits (0-4095) para 0-3.3V
-            // Voltaje en shunt: V = I*R = 0.25A * 10Ω = 2.5V
+            // VSHUNT Y Icarga
             voltage_shunt_adc = (voltage_shunt_raw  * 3.3f) / 4095.0f; // Ajuste por tensiones en ADC 
             voltage_shunt = voltage_shunt_adc * (2.5f / 3.3f);
             measurement.Vshunt_v = voltage_shunt;
             measurement.Iload_ma = (voltage_shunt / SHUNT_RESISTANCE) * 1000.0f; // A -> mA
 
-            // Convertir tensión:
-            // ADC de 12 bits (0-4095) para 0-3.3V
+            // VIN
             voltage_sensor_adc = (voltage_raw * 3.3f) / 4095.0f;
             voltage_sensor = voltage_sensor_adc * (12.0f / 3.3f); 
             measurement.Vin_v = voltage_sensor;
@@ -501,7 +444,7 @@ void task_Sensado(void *pvParameters) {
             // Envia por la cola
             xQueueSend(Queue_Sensado, &measurement, portMAX_DELAY);
             
-            // Delay para la frecuencia de muestreo deseada
+            // Frecuencia de muestro -> 10ms -> 100Hz
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
@@ -939,9 +882,6 @@ void task_Init(void *params) {
     Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
     //Sem_Config_Mutex     = xSemaphoreCreateMutex();
 
-    // Ingresa en modo Config
-    //xSemaphoreGive(Sem_Bin_Config);
-
     // Setpoint de ejemplo
     setpoint_global.Vmax = 8;
     setpoint_global.Imax = 200;
@@ -952,7 +892,9 @@ void task_Init(void *params) {
     setpoint_global.R_setpoints[1] = 100;
     setpoint_global.R_setpoints[2] = 150;
 
-    xSemaphoreGive(Sem_Bin_ReadyToRead);
+    // Ingresa en modo Config
+    xSemaphoreGive(Sem_Bin_Config);
+    //xSemaphoreGive(Sem_Bin_ReadyToRead);
     // Elimino la tarea para liberar recursos
     vTaskDelete(NULL);
 }
@@ -971,7 +913,6 @@ int main()
     xTaskCreate(task_Control, "Control", 1024, NULL, 1, NULL);
     xTaskCreate(task_DAC, "DAC", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
         
-
     // Arranca el scheduler
     vTaskStartScheduler();
     while(1);
