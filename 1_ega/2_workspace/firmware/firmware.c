@@ -248,7 +248,8 @@ alarma_flag_t  check_limits (setpoint_data_t *setpoint, sensado_data_t *measurem
 
 void task_Control (void *pvParameters) {
     
-    pid_params_t pid = { .Kp = 1.85f, .Ki = 0.90f, .Kd = 0.0f, .Ts = 0.07f };
+    //pid_params_t pid = { .Kp = 1.85f, .Ki = 0.90f, .Kd = 0.0f, .Ts = 0.07f };
+    pid_params_t pid = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.0f, .Ts = 0.1f };
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint;
     sensado_data_t measurement, alarma_measurement;
@@ -272,13 +273,13 @@ void task_Control (void *pvParameters) {
         if(xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE)
             pid.Kp = pid.Kp + 0.01;
         if(xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE)
-            pid.Kp = pid.Kp - 0.01; 
-
+            pid.Kp = pid.Kp - 0.01; */
+/* 
         if(xSemaphoreTake(Sem_Bin_Select_Mas, 0) == pdTRUE)
             pid.Ki = pid.Ki + 0.02;
         if(xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE)
-            pid.Ki = pid.Ki - 0.02;   */
-
+            pid.Ki = pid.Ki - 0.02; 
+ */
         // Esperar nueva medición
         if(xQueueReceive(Queue_Sensado, &measurement, 0) == pdTRUE) {
             // Calcular corriente deseada: I = V_max / R
@@ -382,6 +383,7 @@ void task_Control (void *pvParameters) {
             if (((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)) && ((now - last_alarmaeeprom_update)  >= pdMS_TO_TICKS(1000))) {
                 lcd_show_cursor(false,false);
                 snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
+                //snprintf(buffer_lcd.textoLCD[1], 21, "R: %-4d OHM I:%1.2f", R_actual, pid.Ki);
                 snprintf(buffer_lcd.textoLCD[1], 21, "R: %-4d OHM   ", R_actual);
                 snprintf(buffer_lcd.textoLCD[2], 21, "V entrada: %-5.2f V", measurement.Vin_v);
                 snprintf(buffer_lcd.textoLCD[3], 21, "Corriente: %-4d mA", (int)measurement.Iload_ma);
@@ -393,7 +395,7 @@ void task_Control (void *pvParameters) {
         }
         
         // Frecuencia de calculo -> 1ms -> 1KHz
-        vTaskDelay(pdMS_TO_TICKS(1)); 
+        vTaskDelay(pdMS_TO_TICKS(10)); 
     }
 }
 
@@ -883,8 +885,8 @@ void task_Init(void *params) {
     //Sem_Config_Mutex     = xSemaphoreCreateMutex();
 
     // Setpoint de ejemplo
-    setpoint_global.Vmax = 8;
-    setpoint_global.Imax = 200;
+    setpoint_global.Vmax = 11;
+    setpoint_global.Imax = 240;
     setpoint_global.Vmin = 1;
     setpoint_global.Imin = 3;
     setpoint_global.tiempo_ms = 10000;
