@@ -14,6 +14,10 @@
 #define EEPROM_ADDR_LECTURAS    0x0800
 #define EEPROM_MAX_SIZE         0x1000  // 4096 bytes
 
+#define EEPROM_SETPOINT_SLOT0_ADDR   0x0000   // <<-- AJUSTAR
+#define EEPROM_SETPOINT_SLOT1_ADDR   (EEPROM_SETPOINT_SLOT0_ADDR + sizeof(setpoint_data_t))
+#define EEPROM_SETPOINT_META_ADDR    (EEPROM_SETPOINT_SLOT1_ADDR + sizeof(setpoint_data_t))
+
 #define EEPROM_SIZE_SETPOINTS   0x0400  // 1024 bytes
 #define EEPROM_SIZE_ALARMAS     0x0400  // 1024 bytes
 #define EEPROM_SIZE_LECTURAS    0x0800  // 2048 bytes
