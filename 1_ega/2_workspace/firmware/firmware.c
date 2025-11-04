@@ -71,8 +71,8 @@ ds3231_datetime_t dt;   // Datetime global del RTC
 mcp4725_t dac;
 
 // Índice y valor de la resistencia actual
-volatile uint8_t indice_R_actual = 0;
-volatile uint32_t R_actual = 0;
+// volatile uint8_t indice_R_actual = 0;
+// volatile uint32_t R_actual = 0;
 
 typedef struct {
     char textoLCD[4][21];
@@ -93,10 +93,10 @@ typedef struct {
     uint32_t tiempo_ms;
     uint8_t  cantidad_resistencias;
     uint32_t R_setpoints[10];
-    datetime_t timestamp;
+    ds3231_datetime_t timestamp;
 } setpoint_data_t;
 
-setpoint_data_t setpoint_global;
+//setpoint_data_t setpoint_global;
 
 typedef struct {
     float Iload_ma;    // Corriente en mA
@@ -262,6 +262,8 @@ void task_Control (void *pvParameters) {
     lcd_data_t buffer_lcd;
     alarma_flag_t alarma_flags;
     float dac_out, error, error_anterior;
+    uint32_t R_actual = 0;
+    uint32_t ResistenciaSetpoint = 0;
 
     TickType_t last_lcd_update = 0;
     TickType_t last_res_update = 0;   // Control de tiempo para Sem_Resistencia
@@ -285,8 +287,14 @@ void task_Control (void *pvParameters) {
         if(xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE)
             pid.Ki = pid.Ki - 0.02; 
  */
-        // Esperar nueva medición
+        
         if(xQueueReceive(Queue_Sensado, &measurement, 0) == pdTRUE) {
+
+            /* Leer resistencia enviada por task_Resistencia (no bloqueante) */
+            if (xQueueReceive(Queue_Resistencia, &ResistenciaSetpoint, 0) == pdTRUE) {
+                R_actual = ResistenciaSetpoint;   // usa la resistencia recibida en el control
+            }
+
             // Calcular corriente deseada: I = V_max / R
             float I_target;
             if (R_actual > 0) {
@@ -686,8 +694,26 @@ void task_Config(void *params) {
     while (1) {
         if (!inicializado){
             eeprom_read_block(EEPROM_SETPOINT_SLOT0_ADDR, &setpoint_nuevo, sizeof(setpoint_data_t));
+            // Detectar memoria "vacía": todo 0xFF o todo 0x00
+            uint8_t *p = (uint8_t*)&setpoint_nuevo;
+            bool all_ff = true;
+            bool all_00 = true;
+            for (size_t i = 0; i < sizeof(setpoint_data_t); ++i) {
+                if (p[i] != 0xFF) all_ff = false;
+                if (p[i] != 0x00) all_00 = false;
+                if (!all_ff && !all_00) break;
+            }
+            
             inicializado = true;
-            xQueueOverwrite(Queue_Setpoints_Active, &setpoint_nuevo, 0);
+            if (!all_ff && !all_00) {
+                // EEPROM contiene datos: publicar setpoint activo y actualizar global
+                setpoint_global = setpoint_nuevo;
+                xQueueOverwrite(Queue_Setpoints_Active, &setpoint_nuevo, 0);
+            } else {
+                // EEPROM vacía: arrancar en modo CONFIG
+                xSemaphoreGive(Sem_Bin_Config);
+            }
+        }
         }
 
         if (xQueueReceive(Queue_Setpoints, &setpoint_nuevo, portMAX_DELAY) == pdTRUE) {
@@ -700,7 +726,8 @@ void task_Config(void *params) {
             eeprom_write_block(EEPROM_SETPOINT_SLOT0_ADDR, &setpoint_nuevo, sizeof(setpoint_data_t));
             
             // ------ SEMAFORO PARA AVISAR DE NUEVO SETPOINT ------
-            xSemaphoreGive(Sem_Bin_AskSetpoint);
+            //xSemaphoreGive(Sem_Bin_AskSetpoint);
+            xQueueOverwrite(Queue_Setpoints_Active, &setpoint_nuevo, 0);
             //xQueueSend(Queue_Setpoints_Active, &setpoint, 0);
         }
 
@@ -708,9 +735,9 @@ void task_Config(void *params) {
         // Recibe semaforo desde:
         //      1. Inicializacion programa
         //      2. Nuevo Setpoint ()
-        if (xSemaphoreTake(Sem_Bin_AskSetpoint, 0)== pdTRUE){
+        /* if (xSemaphoreTake(Sem_Bin_AskSetpoint, 0)== pdTRUE){
             xQueueOverwrite(Queue_Setpoints_Active, &setpoint_nuevo, 0);
-        }
+        } */
 
 
         /* if (xQueueReceive(Queue_EEPROM, &dato, portMAX_DELAY) == pdTRUE) {
@@ -826,23 +853,22 @@ void task_LCD (void *params) {
 void task_Resistencia(void *pvParameters) {
     TickType_t xLastWakeTime;
     xLastWakeTime = xTaskGetTickCount();
-    
+    setpoint_data_t setpoint_recibido;
     uint32_t ResistenciaSetpoint;
-
+    int indice_R_actual = 0;
+    
     while(1) {
-        if (xSemaphoreTake(Sem_Bin_Resistencia, portMAX_DELAY) == pdTRUE) {
-            // Actualizar resistencia actual
-            //R_actual = setpoint_global.R_setpoints[indice_R_actual];
-            
+        if (xQueuePeek(Queue_Setpoints_Active, &setpoint_recibido, portMAX_DELAY) == pdTRUE) {
+            // Obtener resistencia actual del setpoint
+            ResistenciaSetpoint = setpoint_recibido.R_setpoints[indice_R_actual];
             // Avanzar al siguiente índice
             indice_R_actual++;
-            if (indice_R_actual >= NUM_RESISTENCIAS) {
+            if (indice_R_actual >= setpoint_recibido.cantidad_resistencias) {
                 indice_R_actual = 0; // volver a R1
             }
             xQueueSend(Queue_Resistencia, &ResistenciaSetpoint, portMAX_DELAY);
 
-
-            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_global.tiempo_ms));
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_recibido.tiempo_ms));
         }
     }
 }
@@ -931,19 +957,22 @@ void task_Init(void *params) {
 
     
     // Creación de colas y semaforos
-    Queue_EscribirLCD   = xQueueCreate(1, sizeof(lcd_data_t));
-    Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
-    Queue_ResistenciasUsuario   = xQueueCreate(10, sizeof(uint32_t));
-    Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_data_t));
-    Queue_Sensado       = xQueueCreate(5, sizeof(sensado_data_t));
-    Queue_DAC           = xQueueCreate(5, sizeof(float));
-    Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
-    Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
-    Sem_Bin_OK           = xSemaphoreCreateBinary();
-    Sem_Bin_Config       = xSemaphoreCreateBinary();
-    Sem_Bin_ReadyToRead  = xSemaphoreCreateBinary();
-    Sem_Bin_Resistencia  = xSemaphoreCreateBinary();
-    Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
+    Queue_EscribirLCD       = xQueueCreate(1, sizeof(lcd_data_t));
+    Queue_Setpoints         = xQueueCreate(1, sizeof(setpoint_data_t));
+    Queue_Setpoints_Active  = xQueueCreate(1, sizeof(setpoint_data_t));
+    Queue_EEPROM_Lectura   = xQueueCreate(5, sizeof(eeprom_data_t));
+    Queue_Resistencia       = xQueueCreate(10, sizeof(uint32_t));
+    Queue_EEPROM            = xQueueCreate(1, sizeof(eeprom_data_t));
+    Queue_Sensado           = xQueueCreate(5, sizeof(sensado_data_t));
+    Queue_DAC               = xQueueCreate(5, sizeof(float));
+
+    Sem_Bin_Select_Mas      = xSemaphoreCreateBinary();
+    Sem_Bin_Select_Menos    = xSemaphoreCreateBinary();
+    Sem_Bin_OK               = xSemaphoreCreateBinary();
+    Sem_Bin_Config          = xSemaphoreCreateBinary();
+    Sem_Bin_ReadyToRead     = xSemaphoreCreateBinary();
+    Sem_Bin_Resistencia     = xSemaphoreCreateBinary();
+    Sem_I2C0_Mutex          = xSemaphoreCreateMutex();
     //Sem_Config_Mutex     = xSemaphoreCreateMutex();
 
     // Setpoint de ejemplo
