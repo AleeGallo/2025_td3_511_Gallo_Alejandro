@@ -8,6 +8,8 @@
 // Etiqueta para el autor del modulo
 #define AUTHOR	"Alejandro"
 
+#define LED 17
+
 // Puntero para primer hilo
 static struct task_struct *holaKernel;
 // Puntero para segundo hilo
@@ -18,7 +20,8 @@ static int holaKernel_function(void *params) {
     // Corre mientras no haya otros procesos que lo detengan
     while(!kthread_should_stop()) {
         // Mensaje para el Kernel
-        printk(KERN_INFO "%s: Hola desde el kernel!\n", AUTHOR);
+        printk(KERN_INFO "%s: Prende LED!\n", AUTHOR);
+		gpio_set(LED);
         // Demora de 1 segundo
         msleep(1000);
     }
@@ -30,7 +33,8 @@ static int chauKernel_function(void *params) {
     msleep(500);
 	while(!kthread_should_stop()) {
         // Mensaje para el Kernel
-        printk(KERN_INFO "%s: Chau desde el kernel!\n", AUTHOR);
+        printk(KERN_INFO "%s: Apago LED!\n", AUTHOR);
+		gpio_clr(LED);
         // Demora de 2 segundos
         msleep(1000);
     }
@@ -67,6 +71,13 @@ static int __init kernel_module_init(void) {
         kthread_stop(holaKernel);
         return -1;
     }
+
+	// MAPEAR GPIO EN MEMORIA
+	gpio_map();
+	// poner gpio17 como salida
+	gpio_set_dir_output(LED);
+
+
     return 0;
 }
 
@@ -89,7 +100,8 @@ static void __exit kernel_module_exit(void) {
         kthread_stop(chauKernel);
     }
 
-
+	// LIBERO MAPEO DE MEMORIA DE LED
+	gpio_unmap();
 }
 
 // Registro la funcion de inicializacion y salida
