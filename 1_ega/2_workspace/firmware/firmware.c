@@ -714,7 +714,7 @@ void task_Config(void *params) {
                 xSemaphoreGive(Sem_Bin_Config);
             }
         }
-        }
+        
 
         if (xQueueReceive(Queue_Setpoints, &setpoint_nuevo, portMAX_DELAY) == pdTRUE) {
             // Mover el bloque anterior a la posición 0x0100
