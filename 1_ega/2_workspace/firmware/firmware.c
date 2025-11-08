@@ -79,6 +79,12 @@ typedef struct {
 } lcd_data_t;
 
 typedef struct {
+    float Iload_ma;    // Corriente en mA
+    float Vin_v;     // Tensión en V
+    float Vshunt_v;   // Voltaje en la resistencia shunt
+} sensado_data_t;
+
+typedef struct {
     eeprom_data_type_t tipo_dato;    // Setpoint o Alarma
     eeprom_data_id_t id;             // Vmax, Imax, R1-R10, etc.
     ds3231_datetime_t timestamp;     // Fecha y hora del evento
@@ -102,13 +108,13 @@ typedef struct {
     uint32_t R_setpoints[10];
 } setpoint_data_t;
 
-setpoint_data_t setpoint_global;
-
 typedef struct {
-    float Iload_ma;    // Corriente en mA
-    float Vin_v;     // Tensión en V
-    float Vshunt_v;   // Voltaje en la resistencia shunt
-} sensado_data_t;
+    sensado_data_t lectura;
+    uint32_t resistencia;
+} alarma_info_t;
+
+//setpoint_data_t setpoint_global;
+
 
 typedef struct {
     float Kp, Ki, Kd, Ts;
@@ -127,10 +133,11 @@ QueueHandle_t Queue_EEPROM;
 QueueHandle_t Queue_EscribirLCD;
 QueueHandle_t Queue_Sensado;
 QueueHandle_t Queue_DAC;
-QueueHandle_t Queue_Alarma;
+QueueHandle_t Queue_Alarma, Queue_AlarmaEEPROM;
 SemaphoreHandle_t Sem_Bin_Select_Mas, Sem_Bin_Select_Menos, Sem_Bin_OK;
 SemaphoreHandle_t Sem_Bin_Config, Sem_Bin_Memory;
-SemaphoreHandle_t Sem_Bin_Resistencia, Sem_Bin_AskSetpoint, Sem_Bin_ReadyToRead;
+SemaphoreHandle_t Sem_Bin_FueraDeRango, Sem_Bin_RangoOK;
+SemaphoreHandle_t Sem_Bin_Resistencia, Sem_Bin_AskAlarma, Sem_Bin_AskSetpoint, Sem_Bin_ReadyToRead;
 SemaphoreHandle_t Sem_I2C0_Mutex;
 
 /*------------- INTERRUPCIONES  -------------*/
@@ -265,10 +272,13 @@ void task_Control (void *pvParameters) {
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint;
     sensado_data_t measurement, alarma_measurement;
+    alarma_info_t alarma_info;
     eeprom_data_t alarma_eeprom;
     lcd_data_t buffer_lcd;
-    alarma_flag_t alarma_flags;
+    //alarma_flag_t alarma_flags;
     float dac_out, error, error_anterior;
+
+    uint32_t R_actual, ResistenciaSetpoint;
 
     TickType_t last_lcd_update = 0;
     TickType_t last_res_update = 0;   // Control de tiempo para Sem_Resistencia
@@ -277,6 +287,7 @@ void task_Control (void *pvParameters) {
     TickType_t alarma_timer = 0;
     
     bool alerta = false;
+    bool alarma_activa = false;
     float valorM=0;
 
     while(1) {
@@ -292,63 +303,80 @@ void task_Control (void *pvParameters) {
         if(xSemaphoreTake(Sem_Bin_Select_Menos, 0) == pdTRUE)
             pid.Ki = pid.Ki - 0.02; 
  */
-        // Esperar nueva medición
+
+    
+
+        /* Leer resistencia enviada por task_Resistencia (no bloqueante) */
+        if (xQueueReceive(Queue_Resistencia, &ResistenciaSetpoint, 0) == pdTRUE) {
+            R_actual = ResistenciaSetpoint;   // usa la resistencia recibida en el control
+        }
+
+        
         if(xQueueReceive(Queue_Sensado, &measurement, 0) == pdTRUE) {
-
-            /* Leer resistencia enviada por task_Resistencia (no bloqueante) */
-            if (xQueueReceive(Queue_Resistencia, &ResistenciaSetpoint, 0) == pdTRUE) {
-                R_actual = ResistenciaSetpoint;   // usa la resistencia recibida en el control
+            // Verificar si hay alarma activa (Semáforo dado por task_Alarma)
+            if (xSemaphoreTake(Sem_Bin_FueraDeRango, 0) == pdTRUE) {
+                alarma_activa = true;
             }
 
-            // Calcular corriente deseada: I = V_max / R
-            float I_target;
-            if (R_actual > 0) {
-                I_target = (measurement.Vin_v / R_actual); // I_target en A
-            } else {
-                I_target = 0;
+            // Si hay alarma activa -> detener control
+            if (alarma_activa) {
+                if (xSemaphoreTake(Sem_Bin_RangoOK,0)==pdFALSE){
+                    dac_out = 0.0f;
+                    xQueueSend(Queue_DAC, &dac_out, 0);
+                    snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "ALARMA-Fuera rango");
+
+                } else alarma_activa = false;
             }
-            float Vshunt_target = I_target * 10.0f; // Vshunt [V] = I_target [A] * 10ohm
-            
-            // Control PID - Sobre la tension Vshunt
-            error = Vshunt_target - measurement.Vshunt_v;
+            // Si no hay alarma -> FUNCIONAMIENTO NORMAL
+            else{
+                // Calcular corriente deseada: I = V_max / R
+                float I_target;
+                if (R_actual > 0) {
+                    I_target = (measurement.Vin_v / R_actual); // I_target en A
+                } else {
+                    I_target = 0;
+                }
+                float Vshunt_target = I_target * 10.0f; // Vshunt [V] = I_target [A] * 10ohm
+                
+                // Control PID - Sobre la tension Vshunt
+                error = Vshunt_target - measurement.Vshunt_v;
 
-            // Integración con anti-windup
-            float u_unsat = pid.Kp*error + pid.Ki*pid_state.integral; // previo a saturar
-            float output = u_unsat;  // se saturará más abajo
+                // Integración con anti-windup
+                float u_unsat = pid.Kp*error + pid.Ki*pid_state.integral; // previo a saturar
+                float output = u_unsat;  // se saturará más abajo
 
-            // Anti-windup condicional
-            bool saturado_arriba = (u_unsat > 5.0f);
-            bool saturado_abajo  = (u_unsat < 0.0f);
+                // Anti-windup condicional
+                bool saturado_arriba = (u_unsat > 5.0f);
+                bool saturado_abajo  = (u_unsat < 0.0f);
 
-            // Integro solo si no esta saturado o error lleva hacia adentro
-            if (!( (saturado_arriba && error > 0.0f) || (saturado_abajo && error < 0.0f) )) {
-                pid_state.integral += error * pid.Ts;
+                // Integro solo si no esta saturado o error lleva hacia adentro
+                if (!( (saturado_arriba && error > 0.0f) || (saturado_abajo && error < 0.0f) )) {
+                    pid_state.integral += error * pid.Ts;
+                }
+
+                // Limitante integral
+                if (pid_state.integral > 5.00f) pid_state.integral = 5.00f;
+                if (pid_state.integral < -5.00f) pid_state.integral = -5.00f;
+
+                // Calculo sistema PI
+                output =  pid.Kp * error + pid.Ki * pid_state.integral;
+                
+                pid_state.prev_error = error;                
+                // Limito señal DAC
+                if (output < 0.0f) output = 0.0f;
+                if (output > 5.0f) output = 5.0f;
+                // Enviar valor DAC a cola
+                dac_out = output;
+                xQueueSend(Queue_DAC, &dac_out, portMAX_DELAY);
+                snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
             }
 
-            // Limitante integral
-            if (pid_state.integral > 5.00f) pid_state.integral = 5.00f;
-            if (pid_state.integral < -5.00f) pid_state.integral = -5.00f;
 
-            // Calculo sistema PI
-            output =  pid.Kp * error + pid.Ki * pid_state.integral;
-            
-            pid_state.prev_error = error;                
-            // Limito señal DAC
-            if (output < 0.0f) output = 0.0f;
-            if (output > 5.0f) output = 5.0f;
-            // Enviar valor DAC a cola
-            dac_out = output;
-            xQueueSend(Queue_DAC, &dac_out, portMAX_DELAY);
-            
-            
+            // -------- REFRESH LCD  -----------
             TickType_t now = xTaskGetTickCount();
-            
-            
-
-            // -------- LCD - Medicion en curso -----------
             if (((now - last_lcd_update)  >= pdMS_TO_TICKS(TIEMPO_REFRESH_LCD_MS)) && ((now - last_alarmaeeprom_update)  >= pdMS_TO_TICKS(1000))) {
                 lcd_show_cursor(false,false);
-                snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
+                //snprintf(buffer_lcd.textoLCD[0], 21, "%-20s", "Medicion en curso");
                 //snprintf(buffer_lcd.textoLCD[1], 21, "R: %-4d OHM I:%1.2f", R_actual, pid.Ki);
                 snprintf(buffer_lcd.textoLCD[1], 21, "R: %-4d OHM   ", R_actual);
                 snprintf(buffer_lcd.textoLCD[2], 21, "V entrada: %-5.2f V", measurement.Vin_v);
@@ -358,10 +386,16 @@ void task_Control (void *pvParameters) {
                 last_lcd_update = now;
             }
 
+            // Recibe pedido para enviar info a TaskAlarma
+            if (xSemaphoreTake(Sem_Bin_AskAlarma, 0)==pdTRUE){
+                alarma_info.lectura = measurement;
+                alarma_info.resistencia = R_actual;
+                xQueueSend(Queue_Alarma, &alarma_info,0);
+            }
+
+            // Frecuencia de calculo -> 1ms -> 1KHz
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
-        
-        // Frecuencia de calculo -> 1ms -> 1KHz
-        vTaskDelay(pdMS_TO_TICKS(10)); 
     }
 }
 
@@ -430,16 +464,16 @@ void task_DAC(void *pvParameters) {
 }
 
 void task_Alarma(void *pvParameters) {
-    sensado_data_t valor_Sensado;
+    alarma_info_t info_check_alarma;
     setpoint_data_t setpoint;
     eeprom_log_t eepromValor;
+    bool flag_fuera_rango = false;
+    float Iload_ideal;
 
     while(1) {
-        if (xQueuePeek(Queue_Sensado, &valor_Sensado, portMAX_DELAY) == pdTRUE) {
+        xSemaphoreGive (Sem_Bin_AskAlarma);
+        if (xQueueReceive(Queue_Alarma, &info_check_alarma, portMAX_DELAY) == pdTRUE) {
             xQueuePeek(Queue_SetpointActual, &setpoint, portMAX_DELAY);
-            
-
-
             // ------------- ALARMAS - Si hay alerta guarda en EEPROM --------------
 
             // ENVIAR COLA PARA task_Alarma
@@ -448,14 +482,16 @@ void task_Alarma(void *pvParameters) {
             bool over_max = false;
             bool under_min = false;
 
+            Iload_ideal = (info_check_alarma.lectura.Vin_v / info_check_alarma.resistencia) * 1000.0f;
+
             // --- Verificación de límites ---
-            if (valor_Sensado.Vin_v > setpoint.Vmax || 
-                valor_Sensado.Iload_ma > setpoint.Imax) {
+            if (info_check_alarma.lectura.Vin_v > setpoint.Vmax || 
+                Iload_ideal > setpoint.Imax) {
                 fuera_rango = true;
                 over_max = true;
             } 
-            else if (valor_Sensado.Vin_v < setpoint.Vmin || 
-                     valor_Sensado.Iload_ma < setpoint.Imin) {
+            else if (info_check_alarma.lectura.Vin_v < setpoint.Vmin || 
+                     Iload_ideal < setpoint.Imin) {
                 fuera_rango = true;
                 under_min = true;
             }
@@ -467,6 +503,7 @@ void task_Alarma(void *pvParameters) {
             // Mando log si esta fuera de rango y SEMAFORO para parar la carga
             if (fuera_rango){
                 xSemaphoreGive(Sem_Bin_FueraDeRango);
+                flag_fuera_rango = true;
 
                 // Obtener fecha y hora del RTC
                 if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -475,13 +512,18 @@ void task_Alarma(void *pvParameters) {
                     xSemaphoreGive(Sem_I2C0_Mutex);
                 }
                 eepromValor.tipo = 1;
-                eepromValor.valor = valor_Sensado;
+                eepromValor.valor = info_check_alarma.lectura;
 
                 xQueueSend (Queue_AlarmaEEPROM, &eepromValor, portMAX_DELAY);
             }
+            else {
+                if (flag_fuera_rango){
+                    xSemaphoreGive(Sem_Bin_RangoOK);
+                }
+            }
 
 
-            vTaskDelay (1000);
+            vTaskDelay (500);  // Delay de 500 ms
         }
     }
 }
@@ -499,7 +541,7 @@ void task_Config(void *params) {
     TickType_t last_cursor_time = 0;
     // Variables de cada parametro
     int V_max_mV=0, I_max_mA=0, V_min_mV=0, I_min_mA=0, tiempo_seg=0, cantResistencias=10;
-    uint32_t valores_res[NUM_RESISTENCIAS] = {0};
+    uint32_t valores_res[10]={0};
     // Punteros a cada parámetro (pantalla_actual) 
     int* ptr_valores[TOTAL_PANTALLAS];
     // Limites máximos
@@ -520,8 +562,9 @@ void task_Config(void *params) {
     ptr_valores[3] = &I_min_mA;     maximos[3] = MAX_I_mA_Value;
     ptr_valores[4] = &tiempo_seg;   maximos[4] = MAX_tiempo_mS_Value;
     ptr_valores[5] = &cantResistencias;   maximos[5] = MAX_CantidadR;
-    for(int i=0; i<NUM_RESISTENCIAS; i++){
-        ptr_valores[6 + i] = &valores_res[i];   maximos[6 + i] = MAX_Resistencia_Value;
+    for(int i=0; i < NUM_RESISTENCIAS; i++){
+        ptr_valores[6 + i] = &valores_res[i];   
+        maximos[6 + i] = MAX_Resistencia_Value;
     }
 
     while(1) {
@@ -660,7 +703,7 @@ void task_Config(void *params) {
             setpoint_new.tiempo_ms = tiempo_seg * 1000;
             setpoint_new.cantidad_resistencias = cantResistencias;
             for(int i=0;i<NUM_RESISTENCIAS;i++){
-                setpoint_new.resistencias[i] = valores_res[i];
+                setpoint_new.R_setpoints[i] = valores_res[i];
             }
 
             // Envio SETPOINT a EEPROM
@@ -687,41 +730,63 @@ void task_Config(void *params) {
 
  void task_EEPROM(void *params) {
     eeprom_data_t dato;
-    setpoint_data_t setpoint_nuevo;
+    setpoint_data_t setpoint_nuevo, setpoint_anterior;
     lcd_data_t lcd_text;
     static uint16_t addr_setpoints = EEPROM_ADDR_SETPOINTS;
     static uint16_t addr_alarmas   = EEPROM_ADDR_ALARMAS;
     static uint16_t addr_lecturas  = EEPROM_ADDR_LECTURAS;
     bool inicializado=false;
 
+    uint8_t buffer[sizeof(eeprom_data_t)];
+    uint8_t buffer_lectura[sizeof(eeprom_data_t)];
+
     while (1) {
+        
         if (!inicializado){
-            eeprom_read_block(EEPROM_SETPOINT_SLOT0_ADDR, &setpoint_nuevo, sizeof(setpoint_data_t));
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                eeprom_read_data(i2c_default, EEPROM_SETPOINT_SLOT0_ADDR, buffer, sizeof(setpoint_data_t));
+                memcpy(&setpoint_nuevo, buffer, sizeof(setpoint_data_t));
+            }
+            uint8_t *p = (uint8_t*)&setpoint_nuevo;
+            bool all_ff = true;
+            bool all_00 = true;
+            for (size i=0; i < sizeof(setpoint_data_t); ++i){
+                if (p[i] != 0xFF) all_ff = false;
+                if (p[i] != 0x00) all_00 = false;
+                if (!all_ff && !all_00) break;
+            }
+
             inicializado = true;
-            xQueueOverwrite(Queue_Setpoints_Active, &setpoint_nuevo, 0);
+            if (!all_ff && !all_00){
+                xQueueOverwrite(Queue_SetpointActual, &setpoint_nuevo);
+            } else{
+                xSemaphoreGive(Sem_Bin_Config);
+            }
         }
 
         if (xQueueReceive(Queue_Setpoints, &setpoint_nuevo, portMAX_DELAY) == pdTRUE) {
             // Mover el bloque anterior a la posición 0x0100
             setpoint_data_t setpoint_anterior;
-            eeprom_read_block(EEPROM_SETPOINT_SLOT0_ADDR, &setpoint_anterior, sizeof(setpoint_data_t));
-            eeprom_write_block(EEPROM_SETPOINT_SLOT1_ADDR, &setpoint_anterior, sizeof(setpoint_data_t));
+            memcpy(buffer, &setpoint_nuevo, sizeof(setpoint_data_t));
 
-            // Escribir el nuevo setpoint en 0x0000
-            eeprom_write_block(EEPROM_SETPOINT_SLOT0_ADDR, &setpoint_nuevo, sizeof(setpoint_data_t));
-            
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                eeprom_read_data(i2c_default, EEPROM_SETPOINT_SLOT0_ADDR, buffer_lectura, sizeof(setpoint_data_t));
+                eeprom_write_data(i2c_default, EEPROM_SETPOINT_SLOT1_ADDR, buffer_lectura, sizeof(setpoint_data_t));
+                // Escribir el nuevo setpoint en 0x0000
+                eeprom_write_data(i2c_default, EEPROM_SETPOINT_SLOT0_ADDR, buffer, sizeof(setpoint_data_t));
+            }
             // ------ SEMAFORO PARA AVISAR DE NUEVO SETPOINT ------
-            xSemaphoreGive(Sem_Bin_AskSetpoint);
-            //xQueueSend(Queue_Setpoints_Active, &setpoint, 0);
+            //xSemaphoreGive(Sem_Bin_AskSetpoint);
+            xQueueOverwrite(Queue_SetpointActual, &setpoint_nuevo);
         }
 
         // Si tomo SemaforoSetpoint -> Mando Setpoint actual por cola
         // Recibe semaforo desde:
         //      1. Inicializacion programa
         //      2. Nuevo Setpoint ()
-        if (xSemaphoreTake(Sem_Bin_AskSetpoint, 0)== pdTRUE){
-            xQueueOverwrite(Queue_Setpoints_Active, &setpoint_nuevo, 0);
-        }
+        //  if (xSemaphoreTake(Sem_Bin_AskSetpoint, 0)== pdTRUE){
+        //      xQueueOverwrite(Queue_SetpointActual, &setpoint_nuevo);
+        //  }
 
 
         /* if (xQueueReceive(Queue_EEPROM, &dato, portMAX_DELAY) == pdTRUE) {
@@ -837,23 +902,23 @@ void task_LCD (void *params) {
 void task_Resistencia(void *pvParameters) {
     TickType_t xLastWakeTime;
     xLastWakeTime = xTaskGetTickCount();
-    
+    setpoint_data_t setpoint_recibido;
     uint32_t ResistenciaSetpoint;
+    int indice_R_actual = 0;
 
     while(1) {
-        if (xSemaphoreTake(Sem_Bin_Resistencia, portMAX_DELAY) == pdTRUE) {
-            // Actualizar resistencia actual
-            //R_actual = setpoint_global.R_setpoints[indice_R_actual];
-            
+        if (xQueuePeek(Queue_SetpointActual, &setpoint_recibido, portMAX_DELAY) == pdTRUE) {
+            // Obtener resistencia actual del Setpoint
+            ResistenciaSetpoint = setpoint_recibido.R_setpoints[indice_R_actual];
             // Avanzar al siguiente índice
             indice_R_actual++;
-            if (indice_R_actual >= NUM_RESISTENCIAS) {
+            if (indice_R_actual >= setpoint_recibido.cantidad_resistencias) {
                 indice_R_actual = 0; // volver a R1
             }
             xQueueSend(Queue_Resistencia, &ResistenciaSetpoint, portMAX_DELAY);
 
 
-            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_global.tiempo_ms));
+            vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_recibido.tiempo_ms));
         }
     }
 }
@@ -944,7 +1009,10 @@ void task_Init(void *params) {
     // Creación de colas y semaforos
     Queue_EscribirLCD   = xQueueCreate(1, sizeof(lcd_data_t));
     Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
-    Queue_ResistenciasUsuario   = xQueueCreate(10, sizeof(uint32_t));
+    Queue_SetpointActual    = xQueueCreate(1, sizeof(setpoint_data_t));
+    Queue_Alarma        = xQueueCreate (1, sizeof(alarma_info_t));
+    Queue_AlarmaEEPROM  = xQueueCreate (1, sizeof(eeprom_log_t));
+    Queue_Resistencia   = xQueueCreate(10, sizeof(uint32_t));
     Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_data_t));
     Queue_Sensado       = xQueueCreate(5, sizeof(sensado_data_t));
     Queue_DAC           = xQueueCreate(5, sizeof(float));
@@ -952,20 +1020,23 @@ void task_Init(void *params) {
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
     Sem_Bin_Config       = xSemaphoreCreateBinary();
+    Sem_Bin_FueraDeRango = xSemaphoreCreateBinary();
+    Sem_Bin_RangoOK      = xSemaphoreCreateBinary();
     Sem_Bin_ReadyToRead  = xSemaphoreCreateBinary();
     Sem_Bin_Resistencia  = xSemaphoreCreateBinary();
+    Sem_Bin_AskAlarma    = xSemaphoreCreateBinary();
     Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
     //Sem_Config_Mutex     = xSemaphoreCreateMutex();
 
     // Setpoint de ejemplo
-    setpoint_global.Vmax = 11;
+   /*  setpoint_global.Vmax = 11;
     setpoint_global.Imax = 240;
     setpoint_global.Vmin = 1;
     setpoint_global.Imin = 3;
     setpoint_global.tiempo_ms = 10000;
     setpoint_global.R_setpoints[0] = 50;
     setpoint_global.R_setpoints[1] = 100;
-    setpoint_global.R_setpoints[2] = 150;
+    setpoint_global.R_setpoints[2] = 150; */
 
     // Ingresa en modo Config
     xSemaphoreGive(Sem_Bin_Config);
