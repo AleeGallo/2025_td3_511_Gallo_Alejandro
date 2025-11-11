@@ -36,6 +36,11 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 add_executable(firmware firmware.c )
 
+# Configuración adicional de FreeRTOS de la aplicación (si el archivo existe)
+# set(FREERTOS_USER_CONFIG "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "User FreeRTOSConfig path")
+# Habilito uso de memoria dinámica
+# set(FREERTOS_SUPPORT_DYNAMIC_ALLOCATION "ON" CACHE PATH "FreeRTOS dynamic memory implementation support")
+
 # Add external FreeRTOS library
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freertos)
 
@@ -77,6 +82,15 @@ target_include_directories(firmware PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 
 )
+
+
+# ✅ Agrega el manejador de memoria dinámica de FreeRTOS
+#target_sources(firmware PRIVATE
+#    ${CMAKE_CURRENT_LIST_DIR}/../freertos/portable/MemMang/heap_4.c
+#)
+
+# Defino implementación de heap (ejemplo con heap 3)
+# set(FREERTOS_HEAP "heap_3" CACHE STRING "FreeRTOS heap implementation")
 
 pico_add_extra_outputs(firmware)
 

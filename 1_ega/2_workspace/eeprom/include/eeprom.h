@@ -13,6 +13,7 @@
 #define EEPROM_ADDR_ALARMAS     0x0400
 #define EEPROM_ADDR_LECTURAS    0x0800
 #define EEPROM_MAX_SIZE         0x1000  // 4096 bytes
+#define EEPROM_SIZE_BYTES       4096       // 32 kbit = 4 KB
 
 #define EEPROM_SETPOINT_SLOT0_ADDR   0x0000   // <<-- AJUSTAR
 #define EEPROM_SETPOINT_SLOT1_ADDR   (EEPROM_SETPOINT_SLOT0_ADDR + sizeof(setpoint_data_t))
@@ -44,5 +45,6 @@ typedef enum {
 
 void eeprom_write_data(i2c_inst_t *i2c, uint16_t mem_address, const uint8_t *data, size_t len);
 void eeprom_read_data(i2c_inst_t *i2c, uint16_t mem_address, uint8_t *data, size_t len);
+void eeprom_format(i2c_inst_t *i2c);
 
 #endif // EEPROM_H
