@@ -19,9 +19,19 @@
 #define EEPROM_SETPOINT_SLOT1_ADDR   (EEPROM_SETPOINT_SLOT0_ADDR + sizeof(setpoint_data_t))
 #define EEPROM_SETPOINT_META_ADDR    (EEPROM_SETPOINT_SLOT1_ADDR + sizeof(setpoint_data_t))
 
-#define EEPROM_SIZE_SETPOINTS   0x0400  // 1024 bytes
+/* #define EEPROM_SIZE_SETPOINTS   0x0400  // 1024 bytes
 #define EEPROM_SIZE_ALARMAS     0x0400  // 1024 bytes
-#define EEPROM_SIZE_LECTURAS    0x0800  // 2048 bytes
+#define EEPROM_SIZE_LECTURAS    0x0800  // 2048 bytes */
+
+
+#define EEPROM_LOG_START        0x0500
+#define EEPROM_LOG_SIZE         20                  // bytes por log
+#define EEPROM_TOTAL_SIZE       4096
+#define EEPROM_LOG_AREA_SIZE    (EEPROM_TOTAL_SIZE - EEPROM_LOG_START)
+//#define EEPROM_LOG_MAX          (EEPROM_LOG_AREA_SIZE / EEPROM_LOG_SIZE)  // → 153 logs
+#define EEPROM_LOG_MAX          20
+#define EEPROM_LOG_WRITE_PTR    0x0150   // 2 bytes
+#define EEPROM_LOG_COUNT        0x0152   // 2 bytes
 
 
 typedef enum {
@@ -43,8 +53,10 @@ typedef enum {
     ALARMA_IMIN = 1 << 3
 } alarma_flag_t;
 
-void eeprom_write_data(i2c_inst_t *i2c, uint16_t mem_address, const uint8_t *data, size_t len);
-void eeprom_read_data(i2c_inst_t *i2c, uint16_t mem_address, uint8_t *data, size_t len);
+/* void eeprom_write_data(i2c_inst_t *i2c, uint16_t mem_address, const uint8_t *data, size_t len);
+void eeprom_read_data(i2c_inst_t *i2c, uint16_t mem_address, uint8_t *data, size_t len); */
+int eeprom_write_data(i2c_inst_t *i2c, uint16_t mem_address, const uint8_t *data, size_t len);
+int eeprom_read_data(i2c_inst_t *i2c, uint16_t mem_address, uint8_t *data, size_t len);
 void eeprom_format(i2c_inst_t *i2c);
 
 #endif // EEPROM_H

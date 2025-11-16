@@ -84,10 +84,10 @@ target_include_directories(firmware PRIVATE
 )
 
 
-# ✅ Agrega el manejador de memoria dinámica de FreeRTOS
-#target_sources(firmware PRIVATE
-#    ${CMAKE_CURRENT_LIST_DIR}/../freertos/portable/MemMang/heap_4.c
-#)
+# Agrega el manejador de memoria dinámica de FreeRTOS
+target_sources(firmware PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../freertos/portable/MemMang/heap_4.c
+)
 
 # Defino implementación de heap (ejemplo con heap 3)
 # set(FREERTOS_HEAP "heap_3" CACHE STRING "FreeRTOS heap implementation")

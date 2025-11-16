@@ -55,12 +55,12 @@
 
 #define TIEMPO_REFRESH_LCD_MS  500  // Tiempo de refresco de LCD en MODO ACTIVO
 
+#define UART_ID uart0
+#define UART_TX_PIN 16
+#define UART_RX_PIN 17
+#define UART_BAUDRATE 115200
+#define UART_BUFFER_SIZE 128
 
-//#define configCHECK_FOR_STACK_OVERFLOW 2
-void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
-    printf("Stack overflow en tarea: %s\n", pcTaskName);
-    while(1);
-}
 
 /* ----------------- VARIABLES Y ESTRUCTURAS ----------------- */
 
@@ -135,6 +135,9 @@ typedef struct {
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
+// Queues de manejo de uart
+QueueHandle_t Queue_uart_RX, Queue_uart_TX;
+
 QueueHandle_t Queue_Setpoints, Queue_SetpointActual;
 QueueHandle_t Queue_Resistencia;
 QueueHandle_t Queue_EEPROM;
@@ -201,6 +204,27 @@ void gpio_callback(uint gpio, uint32_t events) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
+/* ISR de recepción UART */
+void ISR_uart_rx() {
+    static char uart_rx_buffer[UART_BUFFER_SIZE];
+    static uint16_t uart_rx_index = 0;
+
+    while (uart_is_readable(UART_ID)) {
+        char c = uart_getc(UART_ID);
+        // if (c == '\r') continue;
+        if (c == '\r' || c == '\n') {
+            if (uart_rx_index > 0) {
+                uart_rx_buffer[uart_rx_index] = '\0';
+                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+                xQueueSendFromISR(Queue_uart_RX, uart_rx_buffer, &xHigherPriorityTaskWoken);
+                uart_rx_index = 0;
+                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+            }
+        } else if (uart_rx_index < UART_BUFFER_SIZE - 1) {
+            uart_rx_buffer[uart_rx_index++] = c;
+        }
+    }
+}
 
 /*-------------------FUNCIONES------------------*/
 
@@ -226,6 +250,64 @@ void gpio_callback(uint gpio, uint32_t events) {
         addr += sizeof(eeprom_data_t);
     }
 } */
+
+
+bool i2c_safe_read(uint16_t addr, uint8_t *buf, size_t len)
+{
+    return (eeprom_read_data(i2c_default, addr, buf, len) == 0);
+}
+
+bool i2c_safe_write(uint16_t addr, const uint8_t *buf, size_t len)
+{
+    return (eeprom_write_data(i2c_default, addr, buf, len) == 0);
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    printf("STACK OVERFLOW: %s\n", pcTaskName);
+
+    // Freno el sistema para debug
+    taskDISABLE_INTERRUPTS();
+
+    while (1) {
+        // Podés parpadear un LED
+        gpio_put(PIN_LED_MAX, 1);
+        gpio_put(PIN_LED_MIN, 1);
+        sleep_ms(200);
+        gpio_put(PIN_LED_MAX, 0);
+        gpio_put(PIN_LED_MIN, 0);
+        sleep_ms(200);
+    }
+}
+
+void vApplicationMallocFailedHook(void)
+{
+    printf("ERROR: MALLOC FAILED\n");
+    taskDISABLE_INTERRUPTS();
+    while(1);
+}
+
+void imprimirLog (eeprom_log_t log_data)
+{
+    printf( "%02d/%02d/%04d %02d:%02d:%02d | "
+        "Tipo: %d | "
+        "I(ma): %.2f | "
+        "Vin: %.2f | "
+        "Vshunt: %.4f\n",
+        log_data.timestamp.day,
+        log_data.timestamp.month,
+        log_data.timestamp.year,
+        log_data.timestamp.hour,
+        log_data.timestamp.minutes,
+        log_data.timestamp.seconds,
+        log_data.tipo,
+        log_data.valor.Iload_ma,
+        log_data.valor.Vin_v,
+        log_data.valor.Vshunt_v
+    );
+}
+
+#define EEPROM_RETRIES 3
 
 // Función auxiliar: calcular columna del cursor según parámetro
 int columna_cursor(int pantalla_actual, int digit_selected) {
@@ -468,7 +550,7 @@ void task_Sensado(void *pvParameters) {
             measurement.Vin_v = voltage_sensor;
             
             // Envia por la cola
-            xQueueSend(Queue_Sensado, &measurement, portMAX_DELAY);
+            xQueueSend(Queue_Sensado, &measurement, 200);
             
             // Frecuencia de muestro -> 10ms -> 100Hz
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -495,7 +577,14 @@ void task_Alarma(void *pvParameters) {
     float Iload_ideal;
 
     while(1) {
+        // Tomo semaforos para que no se bloquee
+        xSemaphoreTake(Sem_Bin_FueraDeRango,0);
+        xSemaphoreTake(Sem_Bin_RangoOK,0);
+
+        // Envio semaforo para tomar muestras
         xSemaphoreGive (Sem_Bin_AskAlarma);
+        vTaskDelay(pdMS_TO_TICKS(100));
+
         if (xQueueReceive(Queue_Alarma, &info_check_alarma, portMAX_DELAY) == pdTRUE) {
             xQueuePeek(Queue_SetpointActual, &setpoint, portMAX_DELAY);
             // ------------- ALARMAS - Si hay alerta guarda en EEPROM --------------
@@ -537,14 +626,16 @@ void task_Alarma(void *pvParameters) {
                 }
             }
 
-            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                 ds3231_get_datetime(&dt, &rtc);
                 eepromValor.timestamp  = dt;
                 xSemaphoreGive(Sem_I2C0_Mutex);
             }
             eepromValor.valor = info_check_alarma.lectura;
-            xQueueSend (Queue_EEPROM, &eepromValor, portMAX_DELAY);
-
+            if (xQueueOverwrite (Queue_EEPROM, &eepromValor)==pdFALSE){
+                printf("ERROR EN ESCRIBIR MEMORIA");
+            }
+            imprimirLog (eepromValor);
             vTaskDelay (500);  // Delay de 500 ms
         }
     }
@@ -767,7 +858,7 @@ void task_Config(void *params) {
 }
 
 
- void task_EEPROM(void *params) {
+void task_EEPROM(void *params) {
     eeprom_data_t dato;
     eeprom_log_t log_data;
     setpoint_data_t setpoint_nuevo, setpoint_anterior, setpoint_leido;
@@ -788,6 +879,21 @@ void task_Config(void *params) {
     //uint8_t buffer_setpoint_anterior[sizeof(setpoint_data_t)];   
     uint8_t buffer_setpoint[sizeof(setpoint_data_t)];
     uint8_t buffer_log[sizeof(eeprom_log_t)];
+
+    // -------------------- LOG CIRCULAR --------------------
+    uint16_t write_ptr = 0;
+    uint16_t log_count = 0;
+
+    // Leer punteros persistentes al iniciar
+    if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        eeprom_read_data(i2c_default, EEPROM_LOG_WRITE_PTR,  (uint8_t*)&write_ptr, 2);
+        eeprom_read_data(i2c_default, EEPROM_LOG_COUNT,      (uint8_t*)&log_count, 2);
+        xSemaphoreGive(Sem_I2C0_Mutex);
+    }
+
+    // Si EEPROM recién iniciada, corregir valores inválidos
+    if (write_ptr >= EEPROM_LOG_MAX) write_ptr = 0;
+    if (log_count > EEPROM_LOG_MAX) log_count = 0;
 
     while (1) {
         //inicializado=true;
@@ -817,7 +923,7 @@ void task_Config(void *params) {
         }
 
 
-       if (xQueueReceive(Queue_Setpoints, &setpoint_nuevo, pdMS_TO_TICKS(1000)) == pdTRUE) {
+       if (xQueueReceive(Queue_Setpoints, &setpoint_nuevo, pdMS_TO_TICKS(50)) == pdTRUE) {
             
             bool ok = true; // bandera de éxito
 
@@ -830,6 +936,7 @@ void task_Config(void *params) {
                 eeprom_read_data(i2c_default, addr_slot0, buffer_setpoint, sizeof(setpoint_data_t));
                 vTaskDelay(pdMS_TO_TICKS(10));
                 eeprom_write_data(i2c_default, addr_slot1, buffer_setpoint, sizeof(setpoint_data_t));
+                xSemaphoreGive(Sem_I2C0_Mutex);
                 vTaskDelay(pdMS_TO_TICKS(10));
                 memcpy(buffer_setpoint, &setpoint_nuevo, sizeof(setpoint_data_t));
                 eeprom_write_data(i2c_default, addr_slot0, buffer_setpoint, sizeof(setpoint_data_t));
@@ -872,27 +979,40 @@ void task_Config(void *params) {
             
         } 
 
-        // 🔹 GUARDAR LOG (ALARMA o LECTURA)
-        // ==========================================================
-        if (xQueueReceive(Queue_EEPROM, &log_data, pdMS_TO_TICKS(500)) == pdTRUE) {
+            // ---------- GUARDAR LOG EN MODO CIRCULAR ----------
+        if (xQueueReceive(Queue_EEPROM, &log_data, pdMS_TO_TICKS(50)) == pdTRUE)
+        {
             memcpy(buffer_log, &log_data, sizeof(eeprom_log_t));
+            uint16_t addr_log = EEPROM_LOG_START + (write_ptr * EEPROM_LOG_SIZE);
 
             if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-                eeprom_write_data(i2c_default, addr_logs, buffer_log, sizeof(eeprom_log_t));
+                // escribir log
+                if (!i2c_safe_write(addr_log, buffer_log, EEPROM_LOG_SIZE)) {
+                    printf("EEPROM: fallo escritura log en addr 0x%04X\n", addr_log);
+                } else {
+                    // avanzar puntero circular en RAM
+                    write_ptr++;
+                    if (write_ptr >= EEPROM_LOG_MAX) write_ptr = 0;
+                    if (log_count < EEPROM_LOG_MAX) log_count++;
+
+                    // escribir punteros persistentes (WRITE_PTR y COUNT) en EEPROM
+                    if (!i2c_safe_write(EEPROM_LOG_WRITE_PTR, (uint8_t*)&write_ptr, sizeof(write_ptr))) {
+                        printf("EEPROM: fallo escritura WRITE_PTR\n");
+                    }
+                    if (!i2c_safe_write(EEPROM_LOG_COUNT, (uint8_t*)&log_count, sizeof(log_count))) {
+                        printf("EEPROM: fallo escritura LOG_COUNT\n");
+                    }
+                }
                 xSemaphoreGive(Sem_I2C0_Mutex);
-            }
-            
-            // Avanza a la próxima dirección disponible
-            addr_logs += sizeof(eeprom_log_t);
-
-            // Prevención de overflow: si se llena, vuelve al inicio del bloque de logs
-            if (addr_logs >= EEPROM_MAX_SIZE - sizeof(eeprom_log_t)) {
-                addr_logs = 0x0400;  // Reiniciar después de los dos setpoints
+            } else {
+                printf("EEPROM: no pudo tomar mutex para escribir log\n");
             }
 
-            vTaskDelay(pdMS_TO_TICKS(10));  // Esperar escritura
+            // Muestra por UART / LCD el log que acabamos de guardar (local)
+            printf("WritePtr: %d | Log_Count: %d\n", write_ptr, log_count);
+            imprimirLog(log_data);
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -913,6 +1033,8 @@ void task_LCD (void *params) {
                     }
                 }
                 xSemaphoreGive(Sem_I2C0_Mutex);  // Liberar el mutex
+            }else{ 
+                printf("ERROR: deadlock I2C\n");
             }
         }
         vTaskDelay(pdMS_TO_TICKS(20)); // pequeña pausa para evitar saturar
@@ -939,6 +1061,40 @@ void task_Resistencia(void *pvParameters) {
                  
             // vTaskDelay(1000);
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_recibido.tiempo_ms));
+        }
+    }
+}
+
+/* Tarea RX de la UART */
+void task_UART_RX(void *pvParams) {
+    // BUFFER
+    char rx_buffer[UART_BUFFER_SIZE];
+
+    while(1) {
+        if (xQueueReceive(Queue_uart_RX, rx_buffer, portMAX_DELAY) == pdTRUE) {
+            // COMANDO SET (ESCRIBIR DATOS)
+            if (strncmp(rx_buffer, "set", 3) == 0)
+                uart_cmd_set(rx_buffer);
+            // COMANDO GET (TRAER DATOS)
+            else if (strncmp(rx_buffer, "get", 3) == 0)
+                uart_cmd_get(rx_buffer);
+            else printf("[UART] Comando desconocido: %s\n", rx_buffer);
+        }
+    }
+}
+
+/* Tarea TX de la UART */
+void task_UART_TX(void *pvParams) {
+    // BUFFER
+    char tx_buffer[UART_BUFFER_SIZE];
+
+    while(1) {
+        // Espera un mensaje en la cola para enviar
+        if (xQueueReceive(Queue_uart_TX, tx_buffer, portMAX_DELAY) == pdTRUE) {
+            // Aseguro terminacion de linea
+            tx_buffer[UART_BUFFER_SIZE - 1] = '\0';
+            // Mando string a la uart
+            uart_puts(UART_ID, tx_buffer);
         }
     }
 }
@@ -1027,15 +1183,17 @@ void task_Init(void *params) {
 
     
     // Creación de colas y semaforos
-    Queue_EscribirLCD   = xQueueCreate(2, sizeof(lcd_data_t));
+    Queue_EscribirLCD   = xQueueCreate(5, sizeof(lcd_data_t));
     Queue_Setpoints     = xQueueCreate(1, sizeof(setpoint_data_t));
     Queue_SetpointActual    = xQueueCreate(1, sizeof(setpoint_data_t));
     Queue_Alarma        = xQueueCreate (1, sizeof(alarma_info_t));
-    Queue_AlarmaEEPROM  = xQueueCreate (1, sizeof(eeprom_log_t));
+    //Queue_AlarmaEEPROM  = xQueueCreate (1, sizeof(eeprom_log_t));
     Queue_Resistencia   = xQueueCreate(1, sizeof(uint16_t));
     Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_log_t));
-    Queue_Sensado       = xQueueCreate(5, sizeof(sensado_data_t));
+    Queue_Sensado       = xQueueCreate(8, sizeof(sensado_data_t));
     Queue_DAC           = xQueueCreate(5, sizeof(float));
+    Queue_uart_RX       = xQueueCreate(4, UART_BUFFER_SIZE);
+    Queue_uart_TX        = xQueueCreate(8, UART_BUFFER_SIZE);
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -1090,12 +1248,15 @@ int main()
     xTaskCreate(task_Init, "Init", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     xTaskCreate(task_Resistencia, "Resistencias", 2*configMINIMAL_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 3, NULL);
-    xTaskCreate(task_EEPROM, "Eeprom", 2*configMINIMAL_STACK_SIZE, NULL, 3, NULL);
+    xTaskCreate(task_EEPROM, "Eeprom", 3*configMINIMAL_STACK_SIZE, NULL, 3, NULL);
     xTaskCreate(task_Config, "Config", 2*configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(task_Alarma, "Alarma" , 512, NULL, 1, NULL);
-    xTaskCreate(task_Sensado, "Sensado", 512, NULL, 1, NULL);
+    xTaskCreate(task_Alarma, "Alarma" , 3*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    xTaskCreate(task_Sensado, "Sensado", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
     xTaskCreate(task_Control, "Control", 512, NULL, 1, NULL);
     xTaskCreate(task_DAC, "DAC", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+
+    /* xTaskCreate(task_UART_RX, "UART-RX", 512, NULL, 2, NULL);
+    xTaskCreate(task_UART_TX, "UART-TX", 128, NULL, 1, NULL); */
     
     // Arranca el scheduler
     vTaskStartScheduler();
