@@ -1,4 +1,4 @@
-# rtos
+# workspace
 
 En este directorio, se deben subir todas las bibliotecas que se usen (sensores, pantallas, actuadores, etc) y un directorio de [firmware](./firmware) donde debe desarrollarse el programa del microcontrolador.
 

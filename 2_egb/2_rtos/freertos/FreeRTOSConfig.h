@@ -1,6 +1,7 @@
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 
+
 /**
  * @file FreeRTOSConfig.h
  * @brief Configuración básica para FreeRTOS en un RP2350
@@ -68,6 +69,7 @@
  * @see Barry, R. "Mastering the FreeRTOS Real Time Kernel", Sección 2.2
  */
 #define configTOTAL_HEAP_SIZE 16364
+//#define configTOTAL_HEAP_SIZE 32768
 /**
  * @brief Cantidad de caracteres que se le pueden asignar al nombre de una tarea para debugging
  * @see Barry, R. "Mastering the FreeRTOS Real Time Kernel", Sección 2.2
@@ -204,6 +206,16 @@
  * @see AWS, "The FreeRTOS™ Reference Manual", Sección 7.2
  */
 #define INCLUDE_vTaskSuspend  1
+
+// Defines mios
+#define configCHECK_FOR_STACK_OVERFLOW 2
+#define configUSE_MALLOC_FAILED_HOOK    1
+#define configUSE_TRACE_FACILITY                1
+#define configUSE_STATS_FORMATTING_FUNCTIONS    1
+#define configSUPPORT_DYNAMIC_ALLOCATION        1
+#define configUSE_HEAP_4 1 
+
+extern size_t xPortGetFreeHeapSize( void );
 
 #ifdef FREERTOS_USER_CONFIG
 #include "FreeRTOSConfig_User.h"
