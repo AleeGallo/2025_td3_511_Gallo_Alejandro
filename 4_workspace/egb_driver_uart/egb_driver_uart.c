@@ -8,6 +8,10 @@
 #include <linux/of_device.h>
 #include <linux/uaccess.h>
 
+#include <linux/property.h>
+#include <linux/mod_devicetable.h>
+#include <linux/platform_device.h>
+
 // Autor del modulo
 #define AUTHOR		"Alejandro"
 #define DRIVER_NAME "egb_driver"
@@ -20,12 +24,38 @@
 // Cantidad maxima de bytes para el buffer de usuario
 #define SHARED_BUFF_SIZE	64
 
+
+
+/* -------------- SERDEV -----------------*/
+
 // IDs de serial devices
 static struct of_device_id serdev_ids[] = {
 	{ .compatible = "brightlight,egb_driver", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, serdev_ids);
+
+// Estructura de implementacion del driver
+static struct serdev_device_driver egb_driver_uart = {
+	.probe = egb_uart_probe,
+	.remove = egb_uart_remove,
+	.driver = {
+		.name = "egb_driver_uart",
+		.of_match_table = serdev_ids,
+	},
+};
+
+
+// Estructura para manejar el char device
+typedef struct {
+	struct cdev cdev;			// Guarda el char device
+	dev_t cdev_number;			// Guarda el major y minor number
+	unsigned int cdev_major;	// Numero mayor
+	struct class *cdev_class;	// Clase del char device
+} egb_cdev_t;
+
+// Variable para mi char device
+egb_cdev_t egb_cdev;
 
 // Puntero global para UART
 static struct serdev_device *g_serdev = NULL;
@@ -51,7 +81,7 @@ static ssize_t cdev_echo_read(struct file *f, char __user *buff, size_t size, lo
 
 	if (not_copied)
 		pr_warn("%s: Solo se pudo copiar %d bytes\n", AUTHOR, delta);
-	*off += delta;
+	// *off += delta;
 	// Devuelvo lo que falta
 	return delta;
 }
@@ -65,14 +95,14 @@ static ssize_t cdev_echo_write(struct file *f, const char __user *buff, size_t s
 	// Veo si se puede copiar
 	if(*off >= SHARED_BUFF_SIZE) { return 0; }
 	// Copio al user
-	not_copied = copy_to_user(buff, &shared_buffer[*off], to_copy);
+	not_copied = copy_to_user(&shared_buffer[*off], buff, to_copy);
 	delta = to_copy - not_copied;
 	// Mensaje testigo para el kernel
 	printk(KERN_INFO "%s: Escrito sobre /dev/%s - %s\n", AUTHOR, CDEV_NAME, shared_buffer);
 
 	if (not_copied)
 		pr_warn("%s: Solo se pudo escribir %d bytes\n", AUTHOR, delta);
-	*off += delta;
+	// *off += delta;
 	// Devuelvo lo que falta
 	return delta;
 }
@@ -116,17 +146,27 @@ static int egb_uart_probe(struct serdev_device *serdev)
     return 0;
 }
 
-static void egb_uart_remove (struct serdev_device *serdev)
+static int egb_uart_remove (struct serdev_device *serdev)
 {
     dev_info(&serdev->dev, "%s: cerrando dispositivo\n", AUTHOR);
     serdev_device_close(serdev);
+	return 0;
 }
 
 
 /* -------------- SERDEV -----------------*/
 
 // Estructura de implementacion del driver
-static struct serdev_device_driver egb_driver_uart = {
+/* static struct serdev_device_driver egb_driver_uart = {
+	.probe = egb_uart_probe,
+	.remove = egb_uart_remove,
+	.driver = {
+		.name = "egb_driver_uart",
+		.of_match_table = serdev_ids,
+	},
+}; */
+
+static struct platform_driver egb_driver_uart = {
 	.probe = egb_uart_probe,
 	.remove = egb_uart_remove,
 	.driver = {
@@ -134,7 +174,6 @@ static struct serdev_device_driver egb_driver_uart = {
 		.of_match_table = serdev_ids,
 	},
 };
-
 
 // Estructura para manejar el char device
 typedef struct {
