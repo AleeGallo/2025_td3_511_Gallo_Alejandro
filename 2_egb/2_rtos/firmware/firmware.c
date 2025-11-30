@@ -2,6 +2,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
@@ -130,30 +132,36 @@ typedef struct {
     float d_filt;
 } pid_state_t;
 
+typedef struct {
+    uint16_t start_index; // ej: desde qué log (0 = último)
+    uint16_t count;       // cuantos registros pedir
+} eeprom_read_req_t;
+
 typedef enum {
     CMD_SET_KP,
     CMD_SET_KI,
     CMD_SET_KD,
-    CMD_SET_SETPOINT,
     CMD_SET_R,
+    CMD_SET_T,
+    CMD_SET_SP,
+
     CMD_GET_KP,
     CMD_GET_KI,
     CMD_GET_KD,
+    CMD_GET_LOG,  // LECTURA
     CMD_GET_VI,
-    CMD_GET_L,  // LECTURA
-    CMD_GET_VSHUNT,
-    CMD_GET_IREAL,
-    CMD_GET_SETPOINT,
+    CMD_GET_I,
+    CMD_GET_SP,
     CMD_GET_R,
     CMD_UNKNOWN
 } cmd_type_t;
 
+pid_params_t pid_params_global = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.24f, .Ts = 0.1f };
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
 // Queues de manejo de uart
-QueueHandle_t Queue_uart_RX, Queue_uart_TX;
-
+QueueHandle_t Queue_uart_RX, Queue_uart_TX, Queue_EEPROM_ReadReq;
 QueueHandle_t Queue_Setpoints, Queue_SetpointActual;
 QueueHandle_t Queue_Resistencia;
 QueueHandle_t Queue_EEPROM;
@@ -166,7 +174,7 @@ SemaphoreHandle_t Sem_Bin_Config, Sem_Bin_Memory;
 SemaphoreHandle_t Sem_Bin_FueraDeRango, Sem_Bin_RangoOK;
 SemaphoreHandle_t Sem_Bin_Resistencia, Sem_Bin_AskAlarma, Sem_Bin_AskSetpoint, Sem_Bin_ReadyToRead;
 SemaphoreHandle_t Sem_I2C0_Mutex;
-
+SemaphoreHandle_t Sem_PID_Params;
 
 /*------------- INTERRUPCIONES  -------------*/
 
@@ -220,27 +228,19 @@ void gpio_callback(uint gpio, uint32_t events) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
+
 /* ISR de recepción UART */
-/* void ISR_uart_rx() {
-    static char uart_rx_buffer[UART_BUFFER_SIZE];
-    static uint16_t uart_rx_index = 0;
+void uart_rx_callback() {
+    BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+    uint8_t c;
 
     while (uart_is_readable(UART_ID)) {
-        char c = uart_getc(UART_ID);
-        // if (c == '\r') continue;
-        if (c == '\r' || c == '\n') {
-            if (uart_rx_index > 0) {
-                uart_rx_buffer[uart_rx_index] = '\0';
-                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-                xQueueSendFromISR(Queue_uart_RX, uart_rx_buffer, &xHigherPriorityTaskWoken);
-                uart_rx_index = 0;
-                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-            }
-        } else if (uart_rx_index < UART_BUFFER_SIZE - 1) {
-            uart_rx_buffer[uart_rx_index++] = c;
-        }
+        c = uart_getc(UART_ID);
+        xQueueSendFromISR(Queue_uart_RX, &c, &pxHigherPriorityTaskWoken);
     }
-} */
+
+    portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+}
 
 
 /*-------------------FUNCIONES------------------*/
@@ -300,23 +300,16 @@ void imprimirLog (eeprom_log_t log_data)
     );
 }
 
-int uart_is_readable(uart_inst_t *id) {
-    return 1; // siempre hay datos
-}
+char* get_arg(const char *cmd, int n) {
+    static char buffer[128];
+    strncpy(buffer, cmd, sizeof(buffer));
 
-char uart_getc(uart_inst_t *id) {
-    return getchar(); // leer desde consola Linux
-}
+    char *saveptr;
+    char *token = strtok_r(buffer, " ", &saveptr);
 
-void uart_puts(uart_inst_t *id, const char *s) {
-    printf("%s", s);
-}
-
-char* get_arg(char *cmd, int n) {
-    // devuelve el argumento n de un string separado por espacios
-    char *token = strtok(cmd, " ");
     for(int i = 0; i < n && token != NULL; i++)
-        token = strtok(NULL, " ");
+        token = strtok_r(NULL, " ", &saveptr);
+
     return token;
 }
 
@@ -329,16 +322,226 @@ cmd_type_t parse_cmd(char *rx) {
     if (strncmp(rx, "SET KI", 6) == 0) return CMD_SET_KI;
     if (strncmp(rx, "SET KD", 6) == 0) return CMD_SET_KD;
     if (strncmp(rx, "SET R", 5) == 0)  return CMD_SET_R;
+    if (strncmp(rx, "SET T", 5) == 0)  return CMD_SET_T; 
+    if (strncmp(rx, "SET SP", 6) == 0)  return CMD_SET_SP; // TBD
 
     if (strncmp(rx, "GET KP", 6) == 0) return CMD_GET_KP;
     if (strncmp(rx, "GET KI", 6) == 0) return CMD_GET_KI;
     if (strncmp(rx, "GET KD", 6) == 0) return CMD_GET_KD;
+    if (strncmp(rx, "GET SP", 6) == 0) return CMD_GET_SP;
     if (strncmp(rx, "GET VI", 6) == 0) return CMD_GET_VI;
     if (strncmp(rx, "GET R", 5) == 0)  return CMD_GET_R;
-    if (strncmp(rx, "GET L", 5) == 0)  return CMD_GET_L;
-    if (strncmp(rx, "GET VSHUNT", 10) == 0) return CMD_GET_VSHUNT;
+    if (strncmp(rx, "GET I", 5) == 0)  return CMD_GET_I;
+    if (strncmp(rx, "GET LOG", 7) == 0)  return CMD_GET_LOG;
+    //if (strncmp(rx, "GET VSHUNT", 10) == 0) return CMD_GET_VSHUNT;
 
     return CMD_UNKNOWN;
+}
+
+// Envía un string formateado a la cola de TX. No bloquea si cola llena; podés ajustar timeout.
+static void uart_sendf(const char *fmt, ...)
+{
+    char buf[128];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    // asegurar newline
+    size_t n = strlen(buf);
+    if (n == 0 || (buf[n-1] != '\n' && buf[n-1] != '\r')) {
+        if (n < sizeof(buf) - 2) {
+            buf[n++] = '\n';
+            buf[n] = '\0';
+        }
+    }
+
+    // enviar a la cola (bloqueante hasta que entre)
+    xQueueSend(Queue_uart_TX, buf, pdMS_TO_TICKS(200)); // timeout 200ms
+}
+
+void CMD_ParseAndHandle(char *rx)
+{
+    // Limpiar CR/LF
+    char *p = strchr(rx, '\r'); if (p) *p = '\0';
+    p = strchr(rx, '\n'); if (p) *p = '\0';
+
+    cmd_type_t tipo = parse_cmd(rx);
+
+    float val_f = 0.0f;
+    long val_l = 0;
+
+    switch (tipo) {
+        /* =========================
+           SET
+        ========================= */
+        case CMD_SET_KP:
+            // Formato: "SET KP <valor>"
+            if (sscanf(rx, "SET KP %f", &val_f) == 1) {
+                if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    pid_params_global.Kp = val_f;
+                    xSemaphoreGive(Sem_PID_Params);
+                    uart_sendf("OK KP=%.3f", val_f);
+                } else {
+                    uart_sendf("ERR BUSY");
+                }
+            } else uart_sendf("ERR PARSE");
+            break;
+
+        case CMD_SET_KI:
+            if (sscanf(rx, "SET KI %f", &val_f) == 1) {
+                if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    pid_params_global.Ki = val_f;
+                    xSemaphoreGive(Sem_PID_Params);
+                    uart_sendf("OK KI=%.3f", val_f);
+                } else uart_sendf("ERR BUSY");
+            } else uart_sendf("ERR PARSE");
+            break;
+
+        case CMD_SET_KD:
+            if (sscanf(rx, "SET KD %f", &val_f) == 1) {
+                if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    pid_params_global.Kd = val_f;
+                    xSemaphoreGive(Sem_PID_Params);
+                    uart_sendf("OK KD=%.3f", val_f);
+                } else uart_sendf("ERR BUSY");
+            } else uart_sendf("ERR PARSE");
+            break;
+
+        case CMD_SET_R:
+            // "SET R <valor>" -> actualiza resistencia actual (y notifica a task_Resistencia si hace falta)
+            if (sscanf(rx, "SET R %f", &val_f) == 1) {
+                // En tu diseño la resistencia actual la maneja la cola Queue_Resistencia.
+                // Envia el valor por esa cola para que task_Resistencia lo tome (no bloqueante).
+                uint16_t R16 = (uint16_t)val_f;
+                xQueueOverwrite(Queue_Resistencia, &R16); // si querés overwrite
+                uart_sendf("OK R=%u", R16);
+            } else uart_sendf("ERR PARSE");
+            break;
+
+        case CMD_SET_T:
+            if (sscanf(rx, "SET T %ld", &val_l) == 1) {
+                uint32_t tms = (uint32_t)val_l;
+                // Actualizar config (si tenés estructura global)
+                // Supongamos Queue_SetpointActual contiene setpoint actual en uso:
+                setpoint_data_t sp;
+                if (xQueuePeek(Queue_SetpointActual, &sp, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    sp.tiempo_ms = tms;
+                    xQueueOverwrite(Queue_SetpointActual, &sp);
+                }
+                uart_sendf("OK T=%u", tms);
+            } else uart_sendf("ERR PARSE");
+            break;
+
+        case CMD_SET_SP:
+            // Podés decidir: SP afecta setpoint_data_t.setpoint (tu diseño actual usa Vmax/Imax etc)
+            setpoint_data_t sp_nuevo;
+
+            float vmax = atof(get_arg(rx,1));
+            float imax = atof(get_arg(rx,2));
+            float vmin = atof(get_arg(rx,3));
+            float imin = atof(get_arg(rx,4));
+            uint32_t tms = atoi(get_arg(rx,5));
+            uint8_t cantR = atoi(get_arg(rx,6));
+
+            sp_nuevo.Vmax = vmax;
+            sp_nuevo.Imax = imax;
+            sp_nuevo.Vmin = vmin;
+            sp_nuevo.Imin = imin;
+            sp_nuevo.tiempo_ms = tms;
+            sp_nuevo.cantidad_resistencias = cantR;
+            // Resistencias
+            for (int i = 0; i < cantR; i++)
+                sp_nuevo.R_setpoints[i] = atoi(get_arg(rx, 7+i));
+            
+            xQueueSend(Queue_Setpoints, &sp_nuevo, 0);
+            uart_sendf("OK SP:Vmax=%.2f Imax=%.2f Vmin=%.2f Imin=%.2f T=%lu CNT_R=%u", sp_nuevo.Vmax, sp_nuevo.Imax, 
+                        sp_nuevo.Vmin, sp_nuevo.Imin, sp_nuevo.tiempo_ms, sp_nuevo.cantidad_resistencias);
+            break;
+            //} else uart_sendf("ERR PARSE");
+            //break;
+
+
+        /* =========================
+           GET
+        ========================= */
+        case CMD_GET_KP:
+            if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(20)) == pdTRUE) {
+                uart_sendf("OK KP=%.3f", pid_params_global.Kp);
+                xSemaphoreGive(Sem_PID_Params);
+            } else uart_sendf("ERR BUSY");
+            break;
+
+        case CMD_GET_KI:
+            if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(20)) == pdTRUE) {
+                uart_sendf("OK KI=%.3f", pid_params_global.Ki);
+                xSemaphoreGive(Sem_PID_Params);
+            } else uart_sendf("ERR BUSY");
+            break;
+
+        case CMD_GET_KD:
+            if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(20)) == pdTRUE) {
+                uart_sendf("OK KD=%.3f", pid_params_global.Kd);
+                xSemaphoreGive(Sem_PID_Params);
+            } else uart_sendf("ERR BUSY");
+            break;
+
+        case CMD_GET_SP:
+        {
+            setpoint_data_t sp;
+            if (xQueuePeek(Queue_SetpointActual, &sp, pdMS_TO_TICKS(50)) == pdTRUE) {
+                // Responder con formato claro
+                uart_sendf("OK SP:Vmax=%.2f Imax=%.2f Vmin=%.2f Imin=%.2f T=%lu CNT_R=%u",
+                           sp.Vmax, sp.Imax, sp.Vmin, sp.Imin, sp.tiempo_ms, sp.cantidad_resistencias);
+            } else uart_sendf("ERR NO_SETPOINT");
+        }
+            break;
+
+        case CMD_GET_R:
+        {
+            // Intentamos obtener la última medición sensada (cola Queue_Sensado)
+            uint16_t R;
+            if (xQueuePeek(Queue_Resistencia, &R, pdMS_TO_TICKS(50)) == pdTRUE) {
+                uart_sendf("OK R=%d ohm", R);
+            } else uart_sendf("ERR NO_RESISTENCIA");
+        }
+            break;
+
+        case CMD_GET_VI:
+        {
+            sensado_data_t s;
+            if (xQueuePeek(Queue_Sensado, &s, pdMS_TO_TICKS(50)) == pdTRUE) {
+                uart_sendf("OK VI=%.2f V", s.Vin_v);
+            } else uart_sendf("ERR NO_SENSADO");
+        }
+            break;
+
+        case CMD_GET_I:
+        {
+            sensado_data_t s;
+            if (xQueuePeek(Queue_Sensado, &s, pdMS_TO_TICKS(50)) == pdTRUE) {
+                uart_sendf("OK I=%.3f mA", s.Iload_ma);
+            } else uart_sendf("ERR NO_SENSADO");
+        }
+            break;
+
+        case CMD_GET_LOG:
+        {
+            // Solicitar a task_EEPROM que envíe logs por UART:
+            eeprom_read_req_t req = { .start_index = 0, .count = 10 }; // ejemplo: pedir últimos 10
+            if (xQueueSend(Queue_EEPROM_ReadReq, &req, pdMS_TO_TICKS(100)) == pdTRUE) {
+                uart_sendf("OK LOG_REQUESTED");
+            } else {
+                uart_sendf("ERR LOG_REQ_FAIL");
+            }
+        }
+            break;
+
+        case CMD_UNKNOWN:
+        default:
+            uart_sendf("ERR UNKNOWN");
+            break;
+    }
 }
 
 
@@ -392,7 +595,7 @@ alarma_flag_t  check_limits (setpoint_data_t *setpoint, sensado_data_t *measurem
 void task_Control (void *pvParameters) {
     
     //pid_params_t pid = { .Kp = 1.85f, .Ki = 0.90f, .Kd = 0.0f, .Ts = 0.07f };
-    pid_params_t pid = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.24f, .Ts = 0.1f };
+    //pid_params_t pid = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.24f, .Ts = 0.1f }; // Este fue el ultimo utilizado
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint;
     sensado_data_t measurement, alarma_measurement;
@@ -441,8 +644,7 @@ void task_Control (void *pvParameters) {
             pid_state.integral = 0.0f; // Resetear integral al cambiar setpoint
             pid_state.prev_error = 0.0f;
         }
-
-        
+                
         if(xQueueReceive(Queue_Sensado, &measurement, 10) == pdTRUE) {
             // Verificar si hay alarma activa (Semáforo dado por task_Alarma)
             if (xSemaphoreTake(Sem_Bin_FueraDeRango, 0) == pdTRUE) {
@@ -473,12 +675,12 @@ void task_Control (void *pvParameters) {
                 error = Vshunt_target - measurement.Vshunt_v;
 
                  // Derivativo con filtro (suaviza respuesta)
-                float derivative = (error - pid_state.prev_error) / pid.Ts;
+                float derivative = (error - pid_state.prev_error) / pid_params_global.Ts;
                 const float alpha = 0.1f; // 0.0–1.0, cuanto más chico, más filtrado
                 pid_state.d_filt = pid_state.d_filt + alpha * (derivative - pid_state.d_filt);
 
                 // Integración con anti-windup
-                float u_unsat = pid.Kp * error + pid.Ki * pid_state.integral + pid.Kd * pid_state.d_filt;
+                float u_unsat = pid_params_global.Kp * error + pid_params_global.Ki * pid_state.integral + pid_params_global.Kd * pid_state.d_filt;
 
                 // Limito señal DAC
                 float output = u_unsat;  // se saturará más abajo
@@ -493,7 +695,7 @@ void task_Control (void *pvParameters) {
 
                 // Integro solo si no esta saturado o error lleva hacia adentro
                 if (!( (saturado_arriba && error > 0.0f) || (saturado_abajo && error < 0.0f) )) {
-                    pid_state.integral += error * pid.Ts;
+                    pid_state.integral += error * pid_params_global.Ts;
                 }
 
                 // Limitante integral
@@ -894,6 +1096,7 @@ void task_EEPROM(void *params) {
     eeprom_log_t log_data;
     setpoint_data_t setpoint_nuevo, setpoint_anterior, setpoint_leido;
     lcd_data_t lcd_text;
+    eeprom_read_req_t req;
     char linea[4][21];
 
     // Direcciones fijas
@@ -944,6 +1147,7 @@ void task_EEPROM(void *params) {
             }
 
             inicializado = true;
+
             if (all_ff || all_00) {
                 xSemaphoreGive(Sem_Bin_Config);  // EEPROM vacía → modo configuración
             } else {
@@ -962,7 +1166,6 @@ void task_EEPROM(void *params) {
                 eeprom_read_data(i2c_default, addr_slot0, buffer_setpoint, sizeof(setpoint_data_t));
                 vTaskDelay(pdMS_TO_TICKS(10));
                 eeprom_write_data(i2c_default, addr_slot1, buffer_setpoint, sizeof(setpoint_data_t));
-                xSemaphoreGive(Sem_I2C0_Mutex);
                 vTaskDelay(pdMS_TO_TICKS(10));
                 memcpy(buffer_setpoint, &setpoint_nuevo, sizeof(setpoint_data_t));
                 eeprom_write_data(i2c_default, addr_slot0, buffer_setpoint, sizeof(setpoint_data_t));
@@ -975,28 +1178,6 @@ void task_EEPROM(void *params) {
             else {
                 ok = false; // No pudo tomar el bus
             }
-            
-
-             // --- Mensaje en pantalla ---
-           /*  if (ok) {
-                snprintf(linea[0], 21, "GUARDADO OK");
-            } else {
-                snprintf(linea[0], 21, "ERROR AL GUARDAR");
-            }
-            linea[2][0] = '\0';
-            linea[3][0] = '\0';
-            for(int i=0; i<4; i++)     snprintf(lcd_text.textoLCD[i], 21, "%-20s", linea[i]);
-            xQueueSend(Queue_EscribirLCD, &lcd_text, portMAX_DELAY);
-            vTaskDelay(pdMS_TO_TICKS(1000)); */
-
-            //memcpy(&setpoint_leido, buffer_setpoint, sizeof(setpoint_data_t));
-            /* lcd_clear();
-            snprintf(lcd_text.textoLCD[0], 21, "Cantidad: %d", setpoint_leido.cantidad_resistencias);
-            snprintf(lcd_text.textoLCD[1], 21, "R1: %d", setpoint_leido.R_setpoints[0]);
-            snprintf(lcd_text.textoLCD[2], 21, "R2: %d", setpoint_leido.R_setpoints[1]);
-            snprintf(lcd_text.textoLCD[3], 21, "R3: %d", setpoint_leido.R_setpoints[2]);
-            xQueueSend(Queue_EscribirLCD, &lcd_text, portMAX_DELAY);
-            vTaskDelay(pdMS_TO_TICKS(2000)); */
 
             memcpy(&setpoint_leido, buffer_setpoint , sizeof(setpoint_data_t));
             xQueueOverwrite(Queue_SetpointActual, &setpoint_leido);
@@ -1036,7 +1217,37 @@ void task_EEPROM(void *params) {
             printf("WritePtr: %d | Log_Count: %d\n", write_ptr, log_count);
             imprimirLog(log_data);
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (xQueueReceive(Queue_EEPROM_ReadReq, &req, 0) == pdTRUE)
+        {
+            uint16_t cantidad = req.count;
+            if (cantidad > log_count) cantidad = log_count;
+
+            // --- Cálculo de índice inicial ---
+            int16_t start = write_ptr - cantidad;
+            if (start < 0) start += EEPROM_LOG_MAX;
+
+            for (uint16_t i = 0; i < cantidad; i++)
+            {
+                uint16_t index = (start + i) % EEPROM_LOG_MAX;
+                uint16_t addr = EEPROM_LOG_START + index * EEPROM_LOG_SIZE;
+                eeprom_log_t log;
+
+                if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                    eeprom_read_data(i2c_default, addr,(uint8_t*)&log, sizeof(eeprom_log_t));
+                    xSemaphoreGive(Sem_I2C0_Mutex);
+                }
+
+                char out[128];
+                snprintf(out, sizeof(out), "LOG: %02d/%02d/%04d %02d:%02d:%02d | Tipo: %d | I(ma): %.2f | Vin: %.2f | Vshunt: %.4f\n",
+                        log.timestamp.day, log.timestamp.month, log.timestamp.year,
+                        log.timestamp.hour,log.timestamp.minutes,log.timestamp.seconds,
+                        log.tipo,log.valor.Iload_ma, log.valor.Vin_v, log.valor.Vshunt_v);
+                
+                xQueueSend(Queue_uart_TX, out, pdMS_TO_TICKS(200));
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
@@ -1073,7 +1284,7 @@ void task_Resistencia(void *pvParameters) {
     uint8_t indice_R_actual = 0;
 
     while(1) {
-        if (xQueuePeek(Queue_SetpointActual, &setpoint_recibido, portMAX_DELAY) == pdTRUE) {
+            if (xQueuePeek(Queue_SetpointActual, &setpoint_recibido, portMAX_DELAY) == pdTRUE) {
             // Obtener resistencia actual del Setpoint
             ResistenciaSetpoint = setpoint_recibido.R_setpoints[indice_R_actual];
             // Avanzar al siguiente índice
@@ -1085,35 +1296,37 @@ void task_Resistencia(void *pvParameters) {
                  
             // vTaskDelay(1000);
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_recibido.tiempo_ms));
-        }
+        } 
     }
 }
 
-/* Tarea RX de la UART */
+// Tarea RX de la UART 
 void task_UART_RX(void *pvParameters)
 {
-    char buf[UART_BUFFER_SIZE];
-    char temp[UART_BUFFER_SIZE];
+    char rx_buffer[UART_BUFFER_SIZE];
     int idx = 0;
-
-    while(1){
-        if (uart_is_readable(UART_ID)){
-            char c = uart_getc(UART_ID);
-            if (c == '\n'){
-                buf[idx] = '\0'; 
-                memcpy(temp, buf, UART_BUFFER_SIZE);
-                xQueueSend(Queue_uart_RX, temp, portMAX_DELAY);
-                idx = 0;  
+    uint8_t c;
+    while(1)
+    {
+        if(xQueueReceive(Queue_uart_RX, &c, portMAX_DELAY)==pdTRUE){
+            if (c == '\r') continue;  // Ignorar \r (carriage return)
+            if (c == '\n') { // Fin de línea
+                rx_buffer[idx] = '\0';       
+                CMD_ParseAndHandle(rx_buffer);  
+                idx = 0;               
             }
-            else if (idx < (UART_BUFFER_SIZE - 1)) {
-                buf[idx++] = c;
+            else {
+                // Acumular caracteres
+                if (idx < UART_BUFFER_SIZE - 1)
+                    rx_buffer[idx++] = c;
+                // Si se llena, reiniciar (opcional)
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
-/* Tarea TX de la UART */
+
+// Tarea TX de la UART 
 void task_UART_TX(void *pvParams) {
     // BUFFER
     char tx_buffer[UART_BUFFER_SIZE] = {0};
@@ -1124,143 +1337,6 @@ void task_UART_TX(void *pvParams) {
             tx_buffer[UART_BUFFER_SIZE - 1] = '\0';
             // Mando string a la uart
             uart_puts(UART_ID, tx_buffer);
-        }
-    }
-}
-
-/* Tarea TX de la UART */
-void task_CMD_Handler(void *pvParameters)
-{
-    char cmd[UART_BUFFER_SIZE] = {0};
-    char tx_buffer[UART_BUFFER_SIZE] = {0};
-    static pid_params_t pid_params = {0};
-    static setpoint_data_t setpoint_actual = {0};
-    static sensado_data_t sensado = {0};
-    static eeprom_data_t alarma = {0};
-    
-    while(1)
-    {
-        //memset(&pid_params, 0, sizeof(pid_params));
-        //memset(cmd, 0, UART_BUFFER_SIZE);
-        if (xQueueReceive(Queue_uart_RX, cmd, portMAX_DELAY))
-        {
-            // 1. Identificar comando
-            cmd_type_t tipo = parse_cmd(cmd);
-
-            switch (tipo)
-            {
-                /* ===== SET: PID ======== */
-
-                case CMD_SET_KP:
-                    float kp = atof(get_arg1(cmd));
-                    pid_params.Kp = kp;
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "OK KP=%.3f\n", kp);
-                    break;
-
-                case CMD_SET_KI:
-                    float ki = atof(get_arg1(cmd));
-                    pid_params.Ki = ki;
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "OK KI=%.3f\n", ki);
-                    break;
-
-                case CMD_SET_KD:
-                    float kd = atof(get_arg1(cmd));
-                    pid_params.Kd = kd;
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "OK KD=%.3f\n", kd);
-                    break;
-                
-
-                /* ============================
-                   SET SETPOINT COMPLETO
-                   Formato: "SET SETPOINT 12.0 0.2 10.0 50 2000 3 100 220 330"
-                ============================ */
-
-                case CMD_SET_SETPOINT:
-                    float vmax = atof(get_arg(cmd,1));
-                    float imax = atof(get_arg(cmd,2));
-                    float vmin = atof(get_arg(cmd,3));
-                    float imin = atof(get_arg(cmd,4));
-                    uint32_t tms = atoi(get_arg(cmd,5));
-                    uint8_t cantR = atoi(get_arg(cmd,6));
-
-                    setpoint_actual.Vmax = vmax;
-                    setpoint_actual.Imax = imax;
-                    setpoint_actual.Vmin = vmin;
-                    setpoint_actual.Imin = imin;
-                    setpoint_actual.tiempo_ms = tms;
-                    setpoint_actual.cantidad_resistencias = cantR;
-                    // Resistencias
-                    for (int i = 0; i < cantR; i++)
-                        setpoint_actual.R_setpoints[i] = atoi(get_arg(cmd, 7+i));
-                    
-                    xQueueSend(Queue_Setpoints, &setpoint_actual, 0);
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "OK SETPOINT\n");
-                    break;
-
-
-                /* ============================
-                   GET: Variables sensadas
-                ============================ */
-
-                case CMD_GET_L:
-                    xQueuePeek(Queue_Sensado, &sensado, pdMS_TO_TICKS(200));
-                    float R_medida = sensado.Vin_v / (sensado.Iload_ma / 1000.0f);
-                    snprintf(tx_buffer, UART_BUFFER_SIZE,"Vin=%.2f V | Iload=%.2f mA | R=%.2f\n", sensado.Vin_v, sensado.Iload_ma, R_medida);
-                    break;
-
-                /* case CMD_GET_VSHUNT:
-                    xQueuePeek(Queue_EEPROM, &sensado, pdMS_TO_TICKS(100));
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "VSHUNT %.4f V\n", sensado.Vshunt_v);
-                    break;
-                
-
-                case CMD_GET_IREAL:
-                    xQueuePeek(Queue_EEPROM, &sensado, pdMS_TO_TICKS(100));
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "IREAL %.2f mA\n", sensado.Iload_ma);
-                    break; */
-                
-
-                /* ============================
-                   GET: PID y SETPOINT
-                ============================ */
-
-                case CMD_GET_KP:
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "KP %.3f\n", pid_params.Kp);
-                    break;
-
-                case CMD_GET_KI:
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "KI %.3f\n", pid_params.Ki);
-                    break;
-
-                case CMD_GET_KD:
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "KD %.3f\n", pid_params.Kd);
-                    break;
-
-                case CMD_GET_SETPOINT:
-                    xQueuePeek(Queue_SetpointActual,&setpoint_actual,pdMS_TO_TICKS(200));
-                    snprintf(tx_buffer, UART_BUFFER_SIZE,
-                        "SETPOINT %.2f %.2f %.2f %.2f %lu %u\n",
-                        setpoint_actual.Vmax,
-                        setpoint_actual.Imax,
-                        setpoint_actual.Vmin,
-                        setpoint_actual.Imin,
-                        setpoint_actual.tiempo_ms,
-                        setpoint_actual.cantidad_resistencias
-                    );
-                    break;
-
-                /* ============================
-                   Comando desconocido
-                ============================ */
-
-                default:
-                    snprintf(tx_buffer, UART_BUFFER_SIZE, "ERR\n");
-                    break;
-            }
-            
-            // Enviar respuesta
-            xQueueSend(Queue_uart_TX, tx_buffer, portMAX_DELAY);
-            memset(tx_buffer, 0, UART_BUFFER_SIZE);
         }
     }
 }
@@ -1300,8 +1376,7 @@ void task_Init(void *params) {
     gpio_set_irq_enabled(PIN_ENC_SW, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(PIN_BTN_CONFIG, GPIO_IRQ_EDGE_RISE, true);
 
-    // Inicialización I2C a 100KHz
-    i2c_init(i2c0, 100000);
+   
 
     // Inicialización ADC
     adc_init();
@@ -1310,7 +1385,8 @@ void task_Init(void *params) {
     adc_gpio_init(27);  // Configura GPIO27 como entrada analógica
     adc_select_input(1);  // Selecciona canal 1 (GPIO27)
 
-
+    // Inicialización I2C a 100KHz
+    i2c_init(i2c0, 100000);
     //pwm_init_channel(0);
 
     // Inicialización LCD
@@ -1318,6 +1394,8 @@ void task_Init(void *params) {
     gpio_set_function(PIN_LCD_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_LCD_SDA);
     gpio_pull_up(PIN_LCD_SCL);
+
+    
     // Inicializa el LCD con el I2C0 y la direccion de 7 bits 0x27
     lcd_init(i2c0, LCD_DIR);
 
@@ -1329,6 +1407,10 @@ void task_Init(void *params) {
     uart_init(UART_ID, UART_BAUDRATE);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+    // IRQ UART
+    irq_set_exclusive_handler(UART0_IRQ, uart_rx_callback);
+    irq_set_enabled(UART0_IRQ, true);
+    uart_set_irq_enables(UART_ID, true, false);  // RX IRQ ON, TX IRQ OFF
     // Configura formato
     uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
     // Habilita FIFO
@@ -1368,8 +1450,9 @@ void task_Init(void *params) {
     Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_log_t));
     Queue_Sensado       = xQueueCreate(8, sizeof(sensado_data_t));
     Queue_DAC           = xQueueCreate(5, sizeof(float));
-    Queue_uart_RX       = xQueueCreate(4, UART_BUFFER_SIZE);
+    Queue_uart_RX       = xQueueCreate(UART_BUFFER_SIZE, sizeof(uint8_t));
     Queue_uart_TX        = xQueueCreate(8, UART_BUFFER_SIZE);
+    Queue_EEPROM_ReadReq = xQueueCreate(2, sizeof(eeprom_read_req_t)); // capacidad 2
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -1380,7 +1463,7 @@ void task_Init(void *params) {
     Sem_Bin_Resistencia  = xSemaphoreCreateBinary();
     Sem_Bin_AskAlarma    = xSemaphoreCreateBinary();
     Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
-    //Sem_Config_Mutex     = xSemaphoreCreateMutex();
+    Sem_PID_Params       = xSemaphoreCreateMutex();
 
     // Setpoint de ejemplo
   /*   setpoint_data_t setpoint_global;
@@ -1402,13 +1485,18 @@ void task_Init(void *params) {
     setpoint_global.R_setpoints[9] = 950; */
 
     // xQueueSend (Queue_Setpoints, &setpoint_global, portMAX_DELAY);
-    /* if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         eeprom_format(i2c0);
         xSemaphoreGive(Sem_I2C0_Mutex);
-    } */
+    }
 
+   /*  lcd_data_t lcd_buffer;
+    snprintf(lcd_buffer.textoLCD[0],21,"CONFIG GUARDADA");
+    for(int i=1;i<4;i++)    lcd_buffer.textoLCD[i][0]='\0';
+    xQueueSend(Queue_EscribirLCD,&lcd_buffer,portMAX_DELAY);
+    vTaskDelay(1000); */
     // Ingresa en modo Config
-    //xSemaphoreGive(Sem_Bin_Config);
+    xSemaphoreGive(Sem_Bin_Config);
     //xSemaphoreGive(Sem_Bin_ReadyToRead);
 
     // Elimino la tarea para liberar recursos
@@ -1428,12 +1516,11 @@ int main()
     xTaskCreate(task_Config, "Config", 2*configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     xTaskCreate(task_Alarma, "Alarma" , 3*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
     xTaskCreate(task_Sensado, "Sensado", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-    xTaskCreate(task_Control, "Control", 512, NULL, 1, NULL);
+    xTaskCreate(task_Control, "Control", 4*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
     xTaskCreate(task_DAC, "DAC", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
-    xTaskCreate(task_UART_RX, "UART-RX", 512, NULL, 2, NULL);
-    xTaskCreate(task_UART_TX, "UART-TX", 128, NULL, 1, NULL);
-    xTaskCreate(task_CMD_Handler, "CMD_Handler", 512, NULL, 1, NULL);
+ /*    xTaskCreate(task_UART_RX, "UART-RX", 4*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    xTaskCreate(task_UART_TX, "UART-TX", 2*configMINIMAL_STACK_SIZE, NULL, 1, NULL); */
     
     // Arranca el scheduler
     vTaskStartScheduler();

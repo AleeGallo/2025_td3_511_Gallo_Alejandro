@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/of_device.h>
 #include <linux/uaccess.h>
+#include <linux/of.h>
 
 // Autor del modulo
 #define AUTHOR		"utn-fra-td3"
@@ -32,7 +33,7 @@ static struct serdev_device *g_serdev = NULL;
 /**
  * @brief Llamada cuando se recibe mensaje por UART
 */
-static int td3_uart_recv(struct serdev_device *serdev, const unsigned char *buffer, size_t size) {
+static size_t td3_uart_recv(struct serdev_device *serdev, const unsigned char *buffer, size_t size) {
 	// Puntero a cadena
 	static char str[SHARED_BUFF_SIZE] = {0};
 	static int i = 0;

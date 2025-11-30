@@ -1,0 +1,1 @@
+savedcmd_/home/frankie/workspace/hellouart/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/frankie/workspace/hellouart/Module.symvers -T /home/frankie/workspace/hellouart/modules.order -i Module.symvers -e 

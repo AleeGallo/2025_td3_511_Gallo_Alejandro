@@ -1,0 +1,1 @@
+savedcmd_/home/frankie/workspace/hellouart/uart_hello_serdev.mod := printf '%s\n'   uart_hello_serdev.o | awk '!x[$$0]++ { print("/home/frankie/workspace/hellouart/"$$0) }' > /home/frankie/workspace/hellouart/uart_hello_serdev.mod

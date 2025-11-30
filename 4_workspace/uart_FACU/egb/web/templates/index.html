@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <title>EGB – Control de motor diferencial</title>
+
+<style>
+/* ----------------- ESTILOS GENERALES ----------------- */
+body {
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 20px;
+}
+
+/* ----------------- HEADER ----------------- */
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 32px;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-align: right;
+}
+
+.header-right img {
+    height: 60px;
+}
+
+.header-text {
+    font-size: 14px;
+    line-height: 1.3;
+}
+
+.header-text strong {
+    display: block;
+}
+
+/* ----------------- PANELS ----------------- */
+.container {
+    display: flex;
+    gap: 20px;
+}
+
+.panel {
+    background: #fff;
+    padding: 16px;
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.panel.controls {
+    max-width: 500px;
+    flex: 0 0 auto;
+}
+
+.panel.logs {
+    flex: 1 1 auto;
+}
+
+/* ----------------- FORM CONTROLS ----------------- */
+button {
+    padding: 6px 12px;
+    margin: 4px 0;
+}
+
+input {
+    padding: 4px;
+    margin: 2px;
+    width: 80px;
+}
+
+.status {
+    margin-top: 10px;
+    padding: 8px;
+    background: #e8f4ff;
+    border-radius: 6px;
+    border: 1px solid #b3d7ff;
+    white-space: pre-wrap;
+}
+
+/* ----------------- LOG AREA ----------------- */
+pre#logarea {
+    background: #111;
+    padding: 10px;
+    border-radius: 6px;
+    height: 400px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    margin: 0;
+}
+
+/* Colores */
+.log-timestamp { color: #999; }
+.log-rx        { color: #00ff00; }
+.log-tx        { color: #00e0ff; }
+.log-lector    { color: #ffff66; }
+.log-error     { color: #ff4444; }
+
+/* Botón limpiar */
+#clear-btn {
+    margin-bottom: 8px;
+    padding: 6px 12px;
+}
+</style>
+</head>
+
+
+
+
+<body>
+
+<!-- ----------------- HEADER ----------------- -->
+<div class="page-header">
+    <div class="header-left">
+        <h1>EGB – Control de motor diferencial</h1>
+    </div>
+
+    <div class="header-right">
+        <img src="{{ url_for('static', filename='utnfra_logo.png') }}">
+        <div class="header-text">
+            <strong>Técnicas Digitales 3 – 2025</strong>
+            Autores:<br>
+            Púrpura, Fiamma<br>
+            Ruderman, Facundo
+        </div>
+    </div>
+</div>
+
+
+
+
+<!-- ----------------- CUERPO ----------------- -->
+<div class="container">
+
+<!-- CONTROLS -->
+<div class="panel controls">
+
+    <form action="/ping" method="POST">
+        <button type="submit">PING</button>
+    </form>
+
+    <form action="/stop" method="POST">
+        <button type="submit">STOP</button>
+    </form>
+
+
+    <h3>RUN</h3>
+    <form action="/run" method="POST">
+        Velocidad: <input name="v" required>
+        Tiempo: <input name="t" required><br>
+        <button type="submit">RUN</button>
+    </form>
+
+
+    <h3>TUNE</h3>
+    <form action="/tune" method="POST">
+        KpL <input name="KpL" required>
+        KiL <input name="KiL" required>
+        KdL <input name="KdL" required><br>
+        KpR <input name="KpR" required>
+        KiR <input name="KiR" required>
+        KdR <input name="KdR" required><br>
+        <button type="submit">TUNE</button>
+    </form>
+
+
+    <h3>TUNE_L</h3>
+    <form action="/tune_l" method="POST">
+        KpL <input name="KpL" required>
+        KiL <input name="KiL" required>
+        KdL <input name="KdL" required><br>
+        <button type="submit">TUNE_L</button>
+    </form>
+
+
+    <h3>TUNE_R</h3>
+    <form action="/tune_r" method="POST">
+        KpR <input name="KpR" required>
+        KiR <input name="KiR" required>
+        KdR <input name="KdR" required><br>
+        <button type="submit">TUNE_R</button>
+    </form>
+
+
+    {% if status %}
+    <div class="status">{{ status }}</div>
+    {% endif %}
+</div>
+
+
+
+
+<!-- LOGS -->
+<div class="panel logs">
+    <h3>Logs UART (/dev/egb)</h3>
+
+    <button id="clear-btn" onclick="limpiarLogs()">Limpiar logs</button>
+
+    <pre id="logarea">Cargando logs...</pre>
+</div>
+
+</div>
+
+
+
+
+<!-- ----------------- JS ----------------- -->
+<script>
+async function actualizarLogs() {
+    try {
+        const res = await fetch('/logs');
+        if (!res.ok) return;
+        const raw = await res.text();
+        const area = document.getElementById('logarea');
+
+        const abajo =
+            (area.scrollTop + area.clientHeight) >= (area.scrollHeight - 5);
+
+        let html = "";
+        for (const line of raw.split("\n")) {
+            if (!line.trim()) continue;
+
+            const m = line.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
+            if (!m) continue;
+
+            const ts = m[1];
+            const txt = m[2];
+
+            let cls = "";
+            if (txt.includes("[RX]"))         cls = "log-rx";
+            else if (txt.includes("[TX]"))    cls = "log-tx";
+            else if (txt.includes("[lector]"))cls = "log-lector";
+            else if (txt.toLowerCase().includes("error"))
+                cls = "log-error";
+            else cls = "log-default";
+
+            html += `<span class="log-timestamp">${ts}</span> ` +
+                    `<span class="${cls}">${txt}</span>\n`;
+        }
+
+        area.innerHTML = html;
+
+        if (abajo)
+            area.scrollTop = area.scrollHeight;
+
+    } catch (err) {
+        console.log("Error obteniendo logs:", err);
+    }
+}
+
+async function limpiarLogs() {
+    await fetch('/clear_logs', { method: "POST" });
+    document.getElementById('logarea').textContent = "(logs borrados)";
+}
+
+actualizarLogs();
+setInterval(actualizarLogs, 1000);
+</script>
+
+</body>
+</html>

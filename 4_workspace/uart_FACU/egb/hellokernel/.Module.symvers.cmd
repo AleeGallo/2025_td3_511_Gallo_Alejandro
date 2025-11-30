@@ -1,0 +1,1 @@
+savedcmd_/home/frankie/workspace/hellokernel/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/frankie/workspace/hellokernel/Module.symvers -T /home/frankie/workspace/hellokernel/modules.order -i Module.symvers -e 

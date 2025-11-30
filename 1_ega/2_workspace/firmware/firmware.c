@@ -300,17 +300,6 @@ void imprimirLog (eeprom_log_t log_data)
     );
 }
 
-int uart_is_readable(uart_inst_t *id) {
-    return 1; // siempre hay datos
-}
-
-char uart_getc(uart_inst_t *id) {
-    return getchar(); // leer desde consola Linux
-}
-
-void uart_puts(uart_inst_t *id, const char *s) {
-    printf("%s", s);
-}
 
 char* get_arg(char *cmd, int n) {
     // devuelve el argumento n de un string separado por espacios
@@ -1090,7 +1079,7 @@ void task_Resistencia(void *pvParameters) {
 }
 
 /* Tarea RX de la UART */
-void task_UART_RX(void *pvParameters)
+/* void task_UART_RX(void *pvParameters)
 {
     char buf[UART_BUFFER_SIZE];
     char temp[UART_BUFFER_SIZE];
@@ -1114,7 +1103,7 @@ void task_UART_RX(void *pvParameters)
 }
 
 /* Tarea TX de la UART */
-void task_UART_TX(void *pvParams) {
+/* void task_UART_TX(void *pvParams) {
     // BUFFER
     char tx_buffer[UART_BUFFER_SIZE] = {0};
     while(1) {
@@ -1126,10 +1115,10 @@ void task_UART_TX(void *pvParams) {
             uart_puts(UART_ID, tx_buffer);
         }
     }
-}
+} */
 
 /* Tarea TX de la UART */
-void task_CMD_Handler(void *pvParameters)
+/* void task_CMD_Handler(void *pvParameters)
 {
     char cmd[UART_BUFFER_SIZE] = {0};
     char tx_buffer[UART_BUFFER_SIZE] = {0};
@@ -1149,7 +1138,6 @@ void task_CMD_Handler(void *pvParameters)
 
             switch (tipo)
             {
-                /* ===== SET: PID ======== */
 
                 case CMD_SET_KP:
                     float kp = atof(get_arg1(cmd));
@@ -1170,10 +1158,6 @@ void task_CMD_Handler(void *pvParameters)
                     break;
                 
 
-                /* ============================
-                   SET SETPOINT COMPLETO
-                   Formato: "SET SETPOINT 12.0 0.2 10.0 50 2000 3 100 220 330"
-                ============================ */
 
                 case CMD_SET_SETPOINT:
                     float vmax = atof(get_arg(cmd,1));
@@ -1198,17 +1182,13 @@ void task_CMD_Handler(void *pvParameters)
                     break;
 
 
-                /* ============================
-                   GET: Variables sensadas
-                ============================ */
 
                 case CMD_GET_L:
                     xQueuePeek(Queue_Sensado, &sensado, pdMS_TO_TICKS(200));
                     float R_medida = sensado.Vin_v / (sensado.Iload_ma / 1000.0f);
                     snprintf(tx_buffer, UART_BUFFER_SIZE,"Vin=%.2f V | Iload=%.2f mA | R=%.2f\n", sensado.Vin_v, sensado.Iload_ma, R_medida);
                     break;
-
-                /* case CMD_GET_VSHUNT:
+                 case CMD_GET_VSHUNT:
                     xQueuePeek(Queue_EEPROM, &sensado, pdMS_TO_TICKS(100));
                     snprintf(tx_buffer, UART_BUFFER_SIZE, "VSHUNT %.4f V\n", sensado.Vshunt_v);
                     break;
@@ -1217,12 +1197,10 @@ void task_CMD_Handler(void *pvParameters)
                 case CMD_GET_IREAL:
                     xQueuePeek(Queue_EEPROM, &sensado, pdMS_TO_TICKS(100));
                     snprintf(tx_buffer, UART_BUFFER_SIZE, "IREAL %.2f mA\n", sensado.Iload_ma);
-                    break; */
+                    break; 
                 
 
-                /* ============================
-                   GET: PID y SETPOINT
-                ============================ */
+         
 
                 case CMD_GET_KP:
                     snprintf(tx_buffer, UART_BUFFER_SIZE, "KP %.3f\n", pid_params.Kp);
@@ -1249,9 +1227,6 @@ void task_CMD_Handler(void *pvParameters)
                     );
                     break;
 
-                /* ============================
-                   Comando desconocido
-                ============================ */
 
                 default:
                     snprintf(tx_buffer, UART_BUFFER_SIZE, "ERR\n");
@@ -1263,7 +1238,7 @@ void task_CMD_Handler(void *pvParameters)
             memset(tx_buffer, 0, UART_BUFFER_SIZE);
         }
     }
-}
+} */
 
 void task_Init(void *params) {
 
@@ -1431,9 +1406,9 @@ int main()
     xTaskCreate(task_Control, "Control", 512, NULL, 1, NULL);
     xTaskCreate(task_DAC, "DAC", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
-    xTaskCreate(task_UART_RX, "UART-RX", 512, NULL, 2, NULL);
+ /*    xTaskCreate(task_UART_RX, "UART-RX", 512, NULL, 2, NULL);
     xTaskCreate(task_UART_TX, "UART-TX", 128, NULL, 1, NULL);
-    xTaskCreate(task_CMD_Handler, "CMD_Handler", 512, NULL, 1, NULL);
+    xTaskCreate(task_CMD_Handler, "CMD_Handler", 512, NULL, 1, NULL); */
     
     // Arranca el scheduler
     vTaskStartScheduler();
