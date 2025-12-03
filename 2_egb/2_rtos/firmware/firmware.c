@@ -156,12 +156,12 @@ typedef enum {
     CMD_UNKNOWN
 } cmd_type_t;
 
-pid_params_t pid_params_global = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.24f, .Ts = 0.1f };
+pid_params_t pid_params_global = { .Kp = 1.85f, .Ki = 3.4f, .Kd = 0.24f, .Ts = 0.1f };
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
 // Queues de manejo de uart
-QueueHandle_t Queue_uart_RX, Queue_uart_TX, Queue_EEPROM_ReadReq;
+QueueHandle_t Queue_uart_RX, Queue_uart_TX;
 QueueHandle_t Queue_Setpoints, Queue_SetpointActual;
 QueueHandle_t Queue_Resistencia;
 QueueHandle_t Queue_EEPROM;
@@ -170,11 +170,11 @@ QueueHandle_t Queue_Sensado;
 QueueHandle_t Queue_DAC;
 QueueHandle_t Queue_Alarma, Queue_AlarmaEEPROM;
 SemaphoreHandle_t Sem_Bin_Select_Mas, Sem_Bin_Select_Menos, Sem_Bin_OK;
-SemaphoreHandle_t Sem_Bin_Config, Sem_Bin_Memory;
+SemaphoreHandle_t Sem_Bin_Config, Sem_Bin_Memory, Sem_Bin_LogRequest, Sem_Bin_ResRequest;
 SemaphoreHandle_t Sem_Bin_FueraDeRango, Sem_Bin_RangoOK;
 SemaphoreHandle_t Sem_Bin_Resistencia, Sem_Bin_AskAlarma, Sem_Bin_AskSetpoint, Sem_Bin_ReadyToRead;
-SemaphoreHandle_t Sem_I2C0_Mutex;
-SemaphoreHandle_t Sem_PID_Params;
+SemaphoreHandle_t Sem_I2C0_Mutex, Sem_PID_Params;
+
 
 /*------------- INTERRUPCIONES  -------------*/
 
@@ -228,15 +228,46 @@ void gpio_callback(uint gpio, uint32_t events) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-
 /* ISR de recepción UART */
-void uart_rx_callback() {
+/* void uart_rx_callback() {
     BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
     uint8_t c;
 
     while (uart_is_readable(UART_ID)) {
         c = uart_getc(UART_ID);
-        xQueueSendFromISR(Queue_uart_RX, &c, &pxHigherPriorityTaskWoken);
+        //xQueueSendFromISR(Queue_uart_RX, &c, &pxHigherPriorityTaskWoken);
+        
+        printf ("Valor leido: %s", c);
+    }
+
+    portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
+} */
+
+void uart_rx_callback() {
+    BaseType_t pxHigherPriorityTaskWoken = pdFALSE;
+    char rx_buffer[UART_BUFFER_SIZE];
+    static size_t rx_index = 0;
+
+    while (uart_is_readable(UART_ID)) {
+        uint8_t c = uart_getc(UART_ID);
+
+        // Solo almacenamos caracteres imprimibles
+        if (c >= 32 && c <= 126) {
+            if (rx_index < UART_BUFFER_SIZE - 1) {
+                rx_buffer[rx_index++] = (char)c;
+            }
+        }
+
+        // Si es fin de línea o buffer lleno, enviamos a la cola
+        if (c == '\r') continue;
+        if (c == '\n' || rx_index == UART_BUFFER_SIZE - 1) {
+            rx_buffer[rx_index] = '\0'; // Terminar string
+            // Enviar a la cola para la tarea de parseo
+            xQueueSendFromISR(Queue_uart_RX, rx_buffer, &pxHigherPriorityTaskWoken);
+            //xQueueSendFromISR(Queue_uart_TX, &rx_buffer, &pxHigherPriorityTaskWoken);
+            // printf ("Leido sobre UART: %s \n", rx_buffer);
+            rx_index = 0; // Reiniciar buffer
+        }
     }
 
     portYIELD_FROM_ISR(pxHigherPriorityTaskWoken);
@@ -299,6 +330,7 @@ void imprimirLog (eeprom_log_t log_data)
         log_data.valor.Vshunt_v
     );
 }
+
 
 char* get_arg(const char *cmd, int n) {
     static char buffer[128];
@@ -372,16 +404,16 @@ void CMD_ParseAndHandle(char *rx)
     long val_l = 0;
 
     switch (tipo) {
-        /* =========================
-           SET
-        ========================= */
+        // =========================
+        //   SET
+        // ========================= 
         case CMD_SET_KP:
             // Formato: "SET KP <valor>"
             if (sscanf(rx, "SET KP %f", &val_f) == 1) {
                 if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(50)) == pdTRUE) {
                     pid_params_global.Kp = val_f;
                     xSemaphoreGive(Sem_PID_Params);
-                    uart_sendf("OK KP=%.3f", val_f);
+                    uart_sendf("KP=%.3f", val_f);
                 } else {
                     uart_sendf("ERR BUSY");
                 }
@@ -393,7 +425,7 @@ void CMD_ParseAndHandle(char *rx)
                 if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(50)) == pdTRUE) {
                     pid_params_global.Ki = val_f;
                     xSemaphoreGive(Sem_PID_Params);
-                    uart_sendf("OK KI=%.3f", val_f);
+                    uart_sendf("KI=%.3f", val_f);
                 } else uart_sendf("ERR BUSY");
             } else uart_sendf("ERR PARSE");
             break;
@@ -403,7 +435,7 @@ void CMD_ParseAndHandle(char *rx)
                 if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(50)) == pdTRUE) {
                     pid_params_global.Kd = val_f;
                     xSemaphoreGive(Sem_PID_Params);
-                    uart_sendf("OK KD=%.3f", val_f);
+                    uart_sendf("KD=%.3f", val_f);
                 } else uart_sendf("ERR BUSY");
             } else uart_sendf("ERR PARSE");
             break;
@@ -415,7 +447,7 @@ void CMD_ParseAndHandle(char *rx)
                 // Envia el valor por esa cola para que task_Resistencia lo tome (no bloqueante).
                 uint16_t R16 = (uint16_t)val_f;
                 xQueueOverwrite(Queue_Resistencia, &R16); // si querés overwrite
-                uart_sendf("OK R=%u", R16);
+                uart_sendf("R=%u", R16);
             } else uart_sendf("ERR PARSE");
             break;
 
@@ -427,9 +459,10 @@ void CMD_ParseAndHandle(char *rx)
                 setpoint_data_t sp;
                 if (xQueuePeek(Queue_SetpointActual, &sp, pdMS_TO_TICKS(20)) == pdTRUE) {
                     sp.tiempo_ms = tms;
-                    xQueueOverwrite(Queue_SetpointActual, &sp);
+                    //xQueueOverwrite(Queue_SetpointActual, &sp);
+                    xQueueSend(Queue_Setpoints, &sp, pdMS_TO_TICKS(500));
                 }
-                uart_sendf("OK T=%u", tms);
+                uart_sendf("T=%u", tms);
             } else uart_sendf("ERR PARSE");
             break;
 
@@ -455,33 +488,33 @@ void CMD_ParseAndHandle(char *rx)
                 sp_nuevo.R_setpoints[i] = atoi(get_arg(rx, 7+i));
             
             xQueueSend(Queue_Setpoints, &sp_nuevo, 0);
-            uart_sendf("OK SP:Vmax=%.2f Imax=%.2f Vmin=%.2f Imin=%.2f T=%lu CNT_R=%u", sp_nuevo.Vmax, sp_nuevo.Imax, 
+            uart_sendf("SP:Vmax=%.2f Imax=%.2f Vmin=%.2f Imin=%.2f T=%lu CNT_R=%u", sp_nuevo.Vmax, sp_nuevo.Imax, 
                         sp_nuevo.Vmin, sp_nuevo.Imin, sp_nuevo.tiempo_ms, sp_nuevo.cantidad_resistencias);
             break;
             //} else uart_sendf("ERR PARSE");
             //break;
 
 
-        /* =========================
-           GET
-        ========================= */
+        // =========================
+        //   GET
+        // ========================= 
         case CMD_GET_KP:
             if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(20)) == pdTRUE) {
-                uart_sendf("OK KP=%.3f", pid_params_global.Kp);
+                uart_sendf("KP=%.3f", pid_params_global.Kp);
                 xSemaphoreGive(Sem_PID_Params);
             } else uart_sendf("ERR BUSY");
             break;
 
         case CMD_GET_KI:
             if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(20)) == pdTRUE) {
-                uart_sendf("OK KI=%.3f", pid_params_global.Ki);
+                uart_sendf("KI=%.3f", pid_params_global.Ki);
                 xSemaphoreGive(Sem_PID_Params);
             } else uart_sendf("ERR BUSY");
             break;
 
         case CMD_GET_KD:
             if (xSemaphoreTake(Sem_PID_Params, pdMS_TO_TICKS(20)) == pdTRUE) {
-                uart_sendf("OK KD=%.3f", pid_params_global.Kd);
+                uart_sendf("KD=%.3f", pid_params_global.Kd);
                 xSemaphoreGive(Sem_PID_Params);
             } else uart_sendf("ERR BUSY");
             break;
@@ -491,7 +524,7 @@ void CMD_ParseAndHandle(char *rx)
             setpoint_data_t sp;
             if (xQueuePeek(Queue_SetpointActual, &sp, pdMS_TO_TICKS(50)) == pdTRUE) {
                 // Responder con formato claro
-                uart_sendf("OK SP:Vmax=%.2f Imax=%.2f Vmin=%.2f Imin=%.2f T=%lu CNT_R=%u",
+                uart_sendf("SP:Vmax=%.2f Imax=%.2f Vmin=%.2f Imin=%.2f T=%lu CNT_R=%u",
                            sp.Vmax, sp.Imax, sp.Vmin, sp.Imin, sp.tiempo_ms, sp.cantidad_resistencias);
             } else uart_sendf("ERR NO_SETPOINT");
         }
@@ -501,9 +534,9 @@ void CMD_ParseAndHandle(char *rx)
         {
             // Intentamos obtener la última medición sensada (cola Queue_Sensado)
             uint16_t R;
-            if (xQueuePeek(Queue_Resistencia, &R, pdMS_TO_TICKS(50)) == pdTRUE) {
-                uart_sendf("OK R=%d ohm", R);
-            } else uart_sendf("ERR NO_RESISTENCIA");
+            if (xSemaphoreGive(Sem_Bin_ResRequest) == pdFALSE) {
+                uart_sendf("ERR NO_RESISTENCIA");
+            }
         }
             break;
 
@@ -511,7 +544,7 @@ void CMD_ParseAndHandle(char *rx)
         {
             sensado_data_t s;
             if (xQueuePeek(Queue_Sensado, &s, pdMS_TO_TICKS(50)) == pdTRUE) {
-                uart_sendf("OK VI=%.2f V", s.Vin_v);
+                uart_sendf("VI=%.2f V", s.Vin_v);
             } else uart_sendf("ERR NO_SENSADO");
         }
             break;
@@ -520,7 +553,7 @@ void CMD_ParseAndHandle(char *rx)
         {
             sensado_data_t s;
             if (xQueuePeek(Queue_Sensado, &s, pdMS_TO_TICKS(50)) == pdTRUE) {
-                uart_sendf("OK I=%.3f mA", s.Iload_ma);
+                uart_sendf("I=%.0f mA", s.Iload_ma);
             } else uart_sendf("ERR NO_SENSADO");
         }
             break;
@@ -528,12 +561,20 @@ void CMD_ParseAndHandle(char *rx)
         case CMD_GET_LOG:
         {
             // Solicitar a task_EEPROM que envíe logs por UART:
-            eeprom_read_req_t req = { .start_index = 0, .count = 10 }; // ejemplo: pedir últimos 10
-            if (xQueueSend(Queue_EEPROM_ReadReq, &req, pdMS_TO_TICKS(100)) == pdTRUE) {
-                uart_sendf("OK LOG_REQUESTED");
-            } else {
+            // eeprom_read_req_t req = { .start_index = 0, .count = 1 }; // ejemplo: pedir últimos 10
+            //eeprom_log_t eeprom_log; 
+            if (xSemaphoreGive (Sem_Bin_LogRequest)==pdFALSE){
                 uart_sendf("ERR LOG_REQ_FAIL");
             }
+             /* if (xQueuePeek(Queue_EEPROM, &eeprom_log, pdMS_TO_TICKS(500))){
+                uart_sendf("LOG: %02d/%02d/%04d %02d:%02d:%02d | Tipo: %d | I(ma): %.2f | Vin: %.2f | Vshunt: %.3f\n",
+                        eeprom_log.timestamp.day, eeprom_log.timestamp.month, eeprom_log.timestamp.year,
+                        eeprom_log.timestamp.hour,eeprom_log.timestamp.minutes,eeprom_log.timestamp.seconds,
+                        eeprom_log.tipo,eeprom_log.valor.Iload_ma, eeprom_log.valor.Vin_v, eeprom_log.valor.Vshunt_v);
+                //uart_sendf("OK LOG_REQUESTED");
+            } else {
+                uart_sendf("ERR LOG_REQ_FAIL");
+            }  */
         }
             break;
 
@@ -543,7 +584,6 @@ void CMD_ParseAndHandle(char *rx)
             break;
     }
 }
-
 
 // Función auxiliar: calcular columna del cursor según parámetro
 int columna_cursor(int pantalla_actual, int digit_selected) {
@@ -595,7 +635,7 @@ alarma_flag_t  check_limits (setpoint_data_t *setpoint, sensado_data_t *measurem
 void task_Control (void *pvParameters) {
     
     //pid_params_t pid = { .Kp = 1.85f, .Ki = 0.90f, .Kd = 0.0f, .Ts = 0.07f };
-    //pid_params_t pid = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.24f, .Ts = 0.1f }; // Este fue el ultimo utilizado
+    //pid_params_t pid = { .Kp = 1.85f, .Ki = 3.22f, .Kd = 0.24f, .Ts = 0.1f };
     pid_state_t pid_state = {0};
     setpoint_data_t setpoint;
     sensado_data_t measurement, alarma_measurement;
@@ -644,7 +684,8 @@ void task_Control (void *pvParameters) {
             pid_state.integral = 0.0f; // Resetear integral al cambiar setpoint
             pid_state.prev_error = 0.0f;
         }
-                
+
+        
         if(xQueueReceive(Queue_Sensado, &measurement, 10) == pdTRUE) {
             // Verificar si hay alarma activa (Semáforo dado por task_Alarma)
             if (xSemaphoreTake(Sem_Bin_FueraDeRango, 0) == pdTRUE) {
@@ -732,6 +773,10 @@ void task_Control (void *pvParameters) {
                 xQueueSend(Queue_Alarma, &alarma_info,0);
             }
 
+            if (xSemaphoreTake(Sem_Bin_ResRequest, 0)){
+                uart_sendf("R=%d", R_actual);
+            }
+
             // Frecuencia de calculo -> 1ms -> 1KHz
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -786,7 +831,7 @@ void task_Sensado(void *pvParameters) {
             xQueueSend(Queue_Sensado, &measurement, 200);
             
             // Frecuencia de muestro -> 10ms -> 100Hz
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(5));
         }
     }
 }
@@ -795,7 +840,7 @@ void task_DAC(void *pvParameters) {
     float dac_in;
     while(1) {
         if (xQueueReceive(Queue_DAC, &dac_in, portMAX_DELAY) == pdTRUE) {
-            xSemaphoreTake(Sem_I2C0_Mutex, portMAX_DELAY);
+            xSemaphoreTake(Sem_I2C0_Mutex, 200);
             mcp4725_set_voltage(&dac, dac_in, MCP4725_RegisterMode, MCP4725_PowerDown_OFF);
             xSemaphoreGive(Sem_I2C0_Mutex);
         }
@@ -818,7 +863,7 @@ void task_Alarma(void *pvParameters) {
         xSemaphoreGive (Sem_Bin_AskAlarma);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        if (xQueueReceive(Queue_Alarma, &info_check_alarma, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(Queue_Alarma, &info_check_alarma, pdMS_TO_TICKS(1000)) == pdTRUE) {
             xQueuePeek(Queue_SetpointActual, &setpoint, portMAX_DELAY);
             // ------------- ALARMAS - Si hay alerta guarda en EEPROM --------------
 
@@ -868,8 +913,14 @@ void task_Alarma(void *pvParameters) {
             if (xQueueOverwrite (Queue_EEPROM, &eepromValor)==pdFALSE){
                 printf("ERROR EN ESCRIBIR MEMORIA");
             }
-            imprimirLog (eepromValor);
-            vTaskDelay (500);  // Delay de 500 ms
+            if(xSemaphoreTake(Sem_Bin_LogRequest,0)==pdTRUE){
+                uart_sendf("LOG: %02d/%02d/%04d %02d:%02d:%02d | Tipo: %d | I(ma): %.2f | Vin: %.2f | Vshunt: %.3f\n",
+                    eepromValor.timestamp.day, eepromValor.timestamp.month, eepromValor.timestamp.year,
+                    eepromValor.timestamp.hour,eepromValor.timestamp.minutes,eepromValor.timestamp.seconds,
+                    eepromValor.tipo,eepromValor.valor.Iload_ma, eepromValor.valor.Vin_v, eepromValor.valor.Vshunt_v);
+            }
+            //imprimirLog (eepromValor);
+            vTaskDelay (1000);  // Delay de 500 ms
         }
     }
 }
@@ -1096,7 +1147,7 @@ void task_EEPROM(void *params) {
     eeprom_log_t log_data;
     setpoint_data_t setpoint_nuevo, setpoint_anterior, setpoint_leido;
     lcd_data_t lcd_text;
-    eeprom_read_req_t req;
+    // eeprom_read_req_t req;
     char linea[4][21];
 
     // Direcciones fijas
@@ -1147,7 +1198,6 @@ void task_EEPROM(void *params) {
             }
 
             inicializado = true;
-
             if (all_ff || all_00) {
                 xSemaphoreGive(Sem_Bin_Config);  // EEPROM vacía → modo configuración
             } else {
@@ -1166,7 +1216,10 @@ void task_EEPROM(void *params) {
                 eeprom_read_data(i2c_default, addr_slot0, buffer_setpoint, sizeof(setpoint_data_t));
                 vTaskDelay(pdMS_TO_TICKS(10));
                 eeprom_write_data(i2c_default, addr_slot1, buffer_setpoint, sizeof(setpoint_data_t));
+                xSemaphoreGive(Sem_I2C0_Mutex);
                 vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
                 memcpy(buffer_setpoint, &setpoint_nuevo, sizeof(setpoint_data_t));
                 eeprom_write_data(i2c_default, addr_slot0, buffer_setpoint, sizeof(setpoint_data_t));
                 vTaskDelay(pdMS_TO_TICKS(10));
@@ -1178,7 +1231,7 @@ void task_EEPROM(void *params) {
             else {
                 ok = false; // No pudo tomar el bus
             }
-
+            
             memcpy(&setpoint_leido, buffer_setpoint , sizeof(setpoint_data_t));
             xQueueOverwrite(Queue_SetpointActual, &setpoint_leido);
             
@@ -1189,7 +1242,7 @@ void task_EEPROM(void *params) {
         {
             memcpy(buffer_log, &log_data, sizeof(eeprom_log_t));
             uint16_t addr_log = EEPROM_LOG_START + (write_ptr * EEPROM_LOG_SIZE);
-
+            /* taskENTER_CRITICAL();
             if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
                 // escribir log
                 if (!i2c_safe_write(addr_log, buffer_log, EEPROM_LOG_SIZE)) {
@@ -1199,7 +1252,7 @@ void task_EEPROM(void *params) {
                     write_ptr++;
                     if (write_ptr >= EEPROM_LOG_MAX) write_ptr = 0;
                     if (log_count < EEPROM_LOG_MAX) log_count++;
-
+                    
                     // escribir punteros persistentes (WRITE_PTR y COUNT) en EEPROM
                     if (!i2c_safe_write(EEPROM_LOG_WRITE_PTR, (uint8_t*)&write_ptr, sizeof(write_ptr))) {
                         printf("EEPROM: fallo escritura WRITE_PTR\n");
@@ -1209,45 +1262,20 @@ void task_EEPROM(void *params) {
                     }
                 }
                 xSemaphoreGive(Sem_I2C0_Mutex);
+                taskEXIT_CRITICAL(); 
+                //uart_sendf("I2C OK - EEPROM\n");
+                //xQueueSend(Queue_uart_TX, "I2C OK - EEPROM\n", pdMS_TO_TICKS(200)); // timeout 200ms
             } else {
                 printf("EEPROM: no pudo tomar mutex para escribir log\n");
-            }
-
+                //uart_sendf("ERROR: deadlock I2C en EEPROM\n");
+                //xQueueSend(Queue_uart_TX, "ERROR: deadlock I2C en EEPROM\n", pdMS_TO_TICKS(200)); // timeout 200ms
+            } */
+            
             // Muestra por UART / LCD el log que acabamos de guardar (local)
-            printf("WritePtr: %d | Log_Count: %d\n", write_ptr, log_count);
-            imprimirLog(log_data);
+            //printf("WritePtr: %d | Log_Count: %d\n", write_ptr, log_count);
+            //imprimirLog(log_data);
         }
-
-        if (xQueueReceive(Queue_EEPROM_ReadReq, &req, 0) == pdTRUE)
-        {
-            uint16_t cantidad = req.count;
-            if (cantidad > log_count) cantidad = log_count;
-
-            // --- Cálculo de índice inicial ---
-            int16_t start = write_ptr - cantidad;
-            if (start < 0) start += EEPROM_LOG_MAX;
-
-            for (uint16_t i = 0; i < cantidad; i++)
-            {
-                uint16_t index = (start + i) % EEPROM_LOG_MAX;
-                uint16_t addr = EEPROM_LOG_START + index * EEPROM_LOG_SIZE;
-                eeprom_log_t log;
-
-                if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                    eeprom_read_data(i2c_default, addr,(uint8_t*)&log, sizeof(eeprom_log_t));
-                    xSemaphoreGive(Sem_I2C0_Mutex);
-                }
-
-                char out[128];
-                snprintf(out, sizeof(out), "LOG: %02d/%02d/%04d %02d:%02d:%02d | Tipo: %d | I(ma): %.2f | Vin: %.2f | Vshunt: %.4f\n",
-                        log.timestamp.day, log.timestamp.month, log.timestamp.year,
-                        log.timestamp.hour,log.timestamp.minutes,log.timestamp.seconds,
-                        log.tipo,log.valor.Iload_ma, log.valor.Vin_v, log.valor.Vshunt_v);
-                
-                xQueueSend(Queue_uart_TX, out, pdMS_TO_TICKS(200));
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -1258,6 +1286,7 @@ void task_LCD (void *params) {
         // Recibo colas con estructura
         if (xQueueReceive(Queue_EscribirLCD, &data_print_LCD, portMAX_DELAY) == pdTRUE) {
              
+            taskENTER_CRITICAL();
             // Toma el mutex antes de escribir en I2C (LCD)
             if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                 for (int i = 0; i < 4; i++) {
@@ -1268,9 +1297,14 @@ void task_LCD (void *params) {
                     }
                 }
                 xSemaphoreGive(Sem_I2C0_Mutex);  // Liberar el mutex
+                taskEXIT_CRITICAL();
+                //uart_sendf("I2C OK - LCD\n");
             }else{ 
-                printf("ERROR: deadlock I2C\n");
+                //printf("ERROR: deadlock I2C\n");
+                //xQueueSend(Queue_uart_TX, "ERROR: deadlock I2C en LCD\n", pdMS_TO_TICKS(200)); // timeout 200ms
+                //uart_sendf("ERROR: deadlock I2C\n");
             }
+            
         }
         vTaskDelay(pdMS_TO_TICKS(20)); // pequeña pausa para evitar saturar
     }
@@ -1284,7 +1318,7 @@ void task_Resistencia(void *pvParameters) {
     uint8_t indice_R_actual = 0;
 
     while(1) {
-            if (xQueuePeek(Queue_SetpointActual, &setpoint_recibido, portMAX_DELAY) == pdTRUE) {
+        if (xQueuePeek(Queue_SetpointActual, &setpoint_recibido, portMAX_DELAY) == pdTRUE) {
             // Obtener resistencia actual del Setpoint
             ResistenciaSetpoint = setpoint_recibido.R_setpoints[indice_R_actual];
             // Avanzar al siguiente índice
@@ -1296,50 +1330,67 @@ void task_Resistencia(void *pvParameters) {
                  
             // vTaskDelay(1000);
             vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(setpoint_recibido.tiempo_ms));
-        } 
-    }
-}
-
-// Tarea RX de la UART 
-void task_UART_RX(void *pvParameters)
-{
-    char rx_buffer[UART_BUFFER_SIZE];
-    int idx = 0;
-    uint8_t c;
-    while(1)
-    {
-        if(xQueueReceive(Queue_uart_RX, &c, portMAX_DELAY)==pdTRUE){
-            if (c == '\r') continue;  // Ignorar \r (carriage return)
-            if (c == '\n') { // Fin de línea
-                rx_buffer[idx] = '\0';       
-                CMD_ParseAndHandle(rx_buffer);  
-                idx = 0;               
-            }
-            else {
-                // Acumular caracteres
-                if (idx < UART_BUFFER_SIZE - 1)
-                    rx_buffer[idx++] = c;
-                // Si se llena, reiniciar (opcional)
-            }
         }
     }
 }
 
+/* Tarea RX de la UART */
+/* void task_UART_RX(void *pvParameters)
+{
+    char rx_buffer[UART_BUFFER_SIZE];
+    while (1) {
+        // Espera hasta recibir un buffer completo de la ISR
+        if (xQueueReceive(Queue_uart_RX, &rx_buffer, portMAX_DELAY) == pdPASS) {
+            // Aquí ya tienes el string completo
+            printf("Buffer recibido: %s\n", rx_buffer);
+            //CMD_ParseAndHandle(rx_buffer);  
+        }
+    }
+}
+ */
 
-// Tarea TX de la UART 
+/* // Tarea TX de la UART 
 void task_UART_TX(void *pvParams) {
     // BUFFER
     char tx_buffer[UART_BUFFER_SIZE] = {0};
     while(1) {
         // Espera un mensaje en la cola para enviar
-        if (xQueueReceive(Queue_uart_TX, tx_buffer, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(Queue_uart_TX, &tx_buffer, portMAX_DELAY) == pdTRUE) {
             // Aseguro terminacion de linea
             tx_buffer[UART_BUFFER_SIZE - 1] = '\0';
+            printf ("Enviado por UART: %s \n", tx_buffer);
             // Mando string a la uart
             uart_puts(UART_ID, tx_buffer);
         }
     }
+} */
+
+void task_UART_CMD(void *pvParams) {
+    // BUFFER
+    char tx_buffer[UART_BUFFER_SIZE] = {0};
+    char rx_buffer[UART_BUFFER_SIZE];
+    while(1) {
+        // Espera un mensaje en la cola para enviar
+        if (xQueueReceive(Queue_uart_RX, &rx_buffer, pdMS_TO_TICKS(300)) == pdPASS) {
+            //taskENTER_CRITICAL();
+            // Aquí ya tienes el string completo
+            printf("Buffer recibido -> %s\n", rx_buffer);
+            CMD_ParseAndHandle(rx_buffer);  
+            //taskEXIT_CRITICAL();
+        }
+
+        if (xQueueReceive(Queue_uart_TX, &tx_buffer, pdMS_TO_TICKS(200)) == pdTRUE) {
+            // Aseguro terminacion de linea
+            //taskENTER_CRITICAL();
+            tx_buffer[UART_BUFFER_SIZE - 1] = '\0';
+            printf ("Dato parseado y enviado por UART -> %s \n", tx_buffer);
+            // Mando string a la uart
+            uart_puts(UART_ID, tx_buffer);
+            //taskEXIT_CRITICAL();
+        }
+    }
 }
+
 
 void task_Init(void *params) {
 
@@ -1376,7 +1427,8 @@ void task_Init(void *params) {
     gpio_set_irq_enabled(PIN_ENC_SW, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(PIN_BTN_CONFIG, GPIO_IRQ_EDGE_RISE, true);
 
-   
+    // Inicialización I2C a 100KHz
+    i2c_init(i2c0, 100000);
 
     // Inicialización ADC
     adc_init();
@@ -1385,8 +1437,7 @@ void task_Init(void *params) {
     adc_gpio_init(27);  // Configura GPIO27 como entrada analógica
     adc_select_input(1);  // Selecciona canal 1 (GPIO27)
 
-    // Inicialización I2C a 100KHz
-    i2c_init(i2c0, 100000);
+
     //pwm_init_channel(0);
 
     // Inicialización LCD
@@ -1394,8 +1445,6 @@ void task_Init(void *params) {
     gpio_set_function(PIN_LCD_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_LCD_SDA);
     gpio_pull_up(PIN_LCD_SCL);
-
-    
     // Inicializa el LCD con el I2C0 y la direccion de 7 bits 0x27
     lcd_init(i2c0, LCD_DIR);
 
@@ -1448,11 +1497,10 @@ void task_Init(void *params) {
     //Queue_AlarmaEEPROM  = xQueueCreate (1, sizeof(eeprom_log_t));
     Queue_Resistencia   = xQueueCreate(1, sizeof(uint16_t));
     Queue_EEPROM        = xQueueCreate(1, sizeof(eeprom_log_t));
-    Queue_Sensado       = xQueueCreate(8, sizeof(sensado_data_t));
+    Queue_Sensado       = xQueueCreate(20, sizeof(sensado_data_t));
     Queue_DAC           = xQueueCreate(5, sizeof(float));
-    Queue_uart_RX       = xQueueCreate(UART_BUFFER_SIZE, sizeof(uint8_t));
-    Queue_uart_TX        = xQueueCreate(8, UART_BUFFER_SIZE);
-    Queue_EEPROM_ReadReq = xQueueCreate(2, sizeof(eeprom_read_req_t)); // capacidad 2
+    Queue_uart_RX       = xQueueCreate(2, UART_BUFFER_SIZE);
+    Queue_uart_TX        = xQueueCreate(4, UART_BUFFER_SIZE);
     Sem_Bin_Select_Mas   = xSemaphoreCreateBinary();
     Sem_Bin_Select_Menos = xSemaphoreCreateBinary();
     Sem_Bin_OK           = xSemaphoreCreateBinary();
@@ -1462,8 +1510,10 @@ void task_Init(void *params) {
     Sem_Bin_ReadyToRead  = xSemaphoreCreateBinary();
     Sem_Bin_Resistencia  = xSemaphoreCreateBinary();
     Sem_Bin_AskAlarma    = xSemaphoreCreateBinary();
+    Sem_Bin_LogRequest    = xSemaphoreCreateCounting(5,0);
+    Sem_Bin_ResRequest   = xSemaphoreCreateBinary();
     Sem_I2C0_Mutex       = xSemaphoreCreateMutex();
-    Sem_PID_Params       = xSemaphoreCreateMutex();
+    Sem_PID_Params     = xSemaphoreCreateMutex();
 
     // Setpoint de ejemplo
   /*   setpoint_data_t setpoint_global;
@@ -1485,18 +1535,13 @@ void task_Init(void *params) {
     setpoint_global.R_setpoints[9] = 950; */
 
     // xQueueSend (Queue_Setpoints, &setpoint_global, portMAX_DELAY);
-    if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    /* if (xSemaphoreTake(Sem_I2C0_Mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         eeprom_format(i2c0);
         xSemaphoreGive(Sem_I2C0_Mutex);
-    }
+    } */
 
-   /*  lcd_data_t lcd_buffer;
-    snprintf(lcd_buffer.textoLCD[0],21,"CONFIG GUARDADA");
-    for(int i=1;i<4;i++)    lcd_buffer.textoLCD[i][0]='\0';
-    xQueueSend(Queue_EscribirLCD,&lcd_buffer,portMAX_DELAY);
-    vTaskDelay(1000); */
     // Ingresa en modo Config
-    xSemaphoreGive(Sem_Bin_Config);
+    //xSemaphoreGive(Sem_Bin_Config);
     //xSemaphoreGive(Sem_Bin_ReadyToRead);
 
     // Elimino la tarea para liberar recursos
@@ -1510,17 +1555,17 @@ int main()
 
     // Creacion de tareas
     xTaskCreate(task_Init, "Init", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
-    xTaskCreate(task_Resistencia, "Resistencias", 2*configMINIMAL_STACK_SIZE, NULL, 4, NULL);
+    xTaskCreate(task_Resistencia, "Resistencias", configMINIMAL_STACK_SIZE, NULL, 4, NULL);
     xTaskCreate(task_LCD, "LCD", configMINIMAL_STACK_SIZE, NULL, 3, NULL);
     xTaskCreate(task_EEPROM, "Eeprom", 3*configMINIMAL_STACK_SIZE, NULL, 3, NULL);
     xTaskCreate(task_Config, "Config", 2*configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(task_Alarma, "Alarma" , 3*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    xTaskCreate(task_Alarma, "Alarma" , 2*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
     xTaskCreate(task_Sensado, "Sensado", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-    xTaskCreate(task_Control, "Control", 4*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    xTaskCreate(task_Control, "Control", 512, NULL, 1, NULL);
     xTaskCreate(task_DAC, "DAC", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-
- /*    xTaskCreate(task_UART_RX, "UART-RX", 4*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-    xTaskCreate(task_UART_TX, "UART-TX", 2*configMINIMAL_STACK_SIZE, NULL, 1, NULL); */
+    xTaskCreate(task_UART_CMD, "UART-CMD", 3*configMINIMAL_STACK_SIZE, NULL, 2, NULL);
+    //xTaskCreate(task_UART_TX, "UART-TX", 2*configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    //xTaskCreate(task_UART_RX, "UART-RX", 2*configMINIMAL_STACK_SIZE, NULL, 2, NULL);
     
     // Arranca el scheduler
     vTaskStartScheduler();

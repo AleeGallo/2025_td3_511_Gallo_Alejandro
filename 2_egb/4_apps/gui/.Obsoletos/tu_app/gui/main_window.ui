@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QWidget" name="MainWindow">
+  <layout class="QHBoxLayout" name="horizontalLayout">
+   <item>
+    <layout class="QVBoxLayout" name="leftLayout">
+     <item><widget class="QLabel" name="labelParams"><property name="text"><string>Parámetros</string></property></widget></item>
+     <item>
+      <layout class="QFormLayout" name="paramsForm">
+       <item row="0" column="0"><widget class="QLabel" name="labelKp"><property name="text"><string>Kp</string></property></widget></item>
+       <item row="0" column="1"><widget class="QLineEdit" name="inputKp"/></item>
+       <item row="1" column="0"><widget class="QLabel" name="labelKi"><property name="text"><string>Ki</string></property></widget></item>
+       <item row="1" column="1"><widget class="QLineEdit" name="inputKi"/></item>
+       <item row="2" column="0"><widget class="QLabel" name="labelKd"><property name="text"><string>Kd</string></property></widget></item>
+       <item row="2" column="1"><widget class="QLineEdit" name="inputKd"/></item>
+       <item row="3" column="0"><widget class="QLabel" name="labelR"><property name="text"><string>R</string></property></widget></item>
+       <item row="3" column="1"><widget class="QLineEdit" name="inputR"/></item>
+       <item row="4" column="0"><widget class="QLabel" name="labelT"><property name="text"><string>T</string></property></widget></item>
+       <item row="4" column="1"><widget class="QLineEdit" name="inputT"/></item>
+       <item row="5" column="0"><widget class="QLabel" name="labelSP"><property name="text"><string>SP</string></property></widget></item>
+       <item row="5" column="1"><widget class="QLineEdit" name="inputSP"/></item>
+      </layout>
+     </item>
+     <item><widget class="QPushButton" name="btnSend"><property name="text"><string>Enviar parámetros</string></property></widget></item>
+     <item><widget class="QPushButton" name="btnStart"><property name="text"><string>Iniciar Lectura</string></property></widget></item>
+    </layout>
+   </item>
+   <item>
+    <layout class="QVBoxLayout" name="graphLayout">
+     <item><widget class="QWidget" name="plotWidget" native="true"/></item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+</ui>

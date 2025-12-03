@@ -7,7 +7,7 @@
 #define UART_RX_PIN 1
 #define BAUD_RATE 115200
 #define LED_PIN 25     // LED onboard
-
+#define UART_BUFFER 128
 
 int main() {
     stdio_init_all();
@@ -23,32 +23,47 @@ int main() {
 
     int cantidad = 0;
     int qty10 = 0;
+    
+
+    char buffer[8][UART_BUFFER];
+
+    snprintf(buffer[0], UART_BUFFER, "GET KP\n");
+    snprintf(buffer[1], UART_BUFFER, "GET KI\n");
+    snprintf(buffer[2], UART_BUFFER, "GET KD\n");
+    snprintf(buffer[3], UART_BUFFER, "GET SP\n");
+    snprintf(buffer[4], UART_BUFFER, "GET R \n");
+    snprintf(buffer[5], UART_BUFFER, "GET VI\n");
+    snprintf(buffer[6], UART_BUFFER, "GET I\n");
+    snprintf(buffer[7], UART_BUFFER, "GET LOG \n");
+
+    int idx = 0;  // índice del buffer a enviar
 
     while (true) {
-
-        cantidad += 1;
-        qty10 += 10;
-
-        char buffer[64], buff_receiver[64];
-        snprintf(buffer, sizeof(buffer), "%d\n", cantidad);
-        printf (buffer);
-        uart_puts(UART_ID, buffer);
+        // Enviar un buffer
+        uart_puts(UART_ID, buffer[idx]);
+        printf("Enviado: %s", buffer[idx]);
 
         // Leer lo que llega por UART
-        int idx = 0;
-        while (uart_is_readable(UART_ID) && idx < sizeof(buff_receiver)-1) {
-            buff_receiver[idx++] = uart_getc(UART_ID);
+        char buff_receiver[UART_BUFFER];
+        int r_idx = 0;
+        while (uart_is_readable(UART_ID) && r_idx < UART_BUFFER - 1) {
+            buff_receiver[r_idx++] = uart_getc(UART_ID);
         }
-        buff_receiver[idx] = '\0'; // cerrar string
+        buff_receiver[r_idx] = '\0';
 
-        // Mostrar lo leído
-        if (idx > 0) {
+        if (r_idx > 0) {
             printf("Leido: %s\n", buff_receiver);
         }
-        // Toggle LED
+
+        // Parpadeo LED
         gpio_put(LED_PIN, 1);
-        sleep_ms(500);
+        sleep_ms(100);
         gpio_put(LED_PIN, 0);
-        sleep_ms(500); // Total ~500 ms por loop
+
+        // Esperar 1 segundo antes del próximo envío
+        sleep_ms(2000);
+
+        // Pasar al siguiente buffer
+        idx = (idx + 1) % 8;
     }
 }

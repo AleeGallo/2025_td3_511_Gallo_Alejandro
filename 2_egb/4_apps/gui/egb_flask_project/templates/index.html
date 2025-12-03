@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EGB - Control PID (Web)</title>
+    <link rel="stylesheet" href="/static/css/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <header class="egb-title">
+        <h1>EGB - CARGA ELECTRÓNICA PROGRAMABLE</h1>
+        <img src="https://confedi.org.ar/wp-content/uploads/2022/12/UTN-Avellaneda-Logo-Institucional_color.png" alt="logo-utn">
+      </header>
+      <main>
+        <section class="left">
+          <!-- <h2>Parámetros</h2>
+        <div class="form-row"><label>Kp</label><input id="kp" type="number" step="any"></div>
+        <div class="form-row"><label>Ki</label><input id="ki" type="number" step="any"></div>
+        <div class="form-row"><label>Kd</label><input id="kd" type="number" step="any"></div>
+        <div class="form-row"><label>R</label><input id="r" type="number" step="any"></div>
+        <div class="form-row"><label>T</label><input id="t" type="number" step="any"></div>
+        <div class="buttons">
+          <button id="btnSetAll">SET</button>
+          <button id="btnGetAll">GET</button>
+          <button id="btnGetLog">GET LOG</button>
+        </div> -->
+
+          <h2>Comando Manual</h2>
+          <div class="form-row">
+            <label>Modo</label>
+            <select id="manualMode" class="manual-mode">
+              <option value="GET">GET</option>
+              <option value="SET">SET</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <label>Parámetro</label>
+            <input
+              id="manualParam"
+              type="text"
+              placeholder="Ej: R, VI, T, SP, KP, KI, KD"
+            />
+          </div>
+
+          <div class="form-row">
+            <label>Valor</label>
+            <input
+              id="manualValue"
+              type="text"
+              step="any"
+              placeholder="Solo para SET"
+            />
+          </div>
+
+          <div class="buttons">
+            <button id="btnManualSend">CONFIRMAR</button>
+            <button id="btnGetLog">GET LOG</button>
+          </div>
+
+          <h2>Terminal</h2>
+          <pre id="terminal" class="terminal"></pre>
+        </section>
+        <section class="right">
+          <h2>Corriente (I)</h2>
+          <canvas id="chartI"></canvas>
+          <div class="plot-controls">
+            <button id="startPlot">Iniciar</button>
+            <button id="stopPlot">Parar</button>
+            <label
+              >Intervalo ms: <input id="interval" type="number" value="1000"
+            /></label>
+          </div>
+        </section>
+      </main>
+      <footer>
+        <!-- <P>Servidor Flask · Accesible en esta máquina en el puerto 5000</P> -->
+        <p>Alejandro Martin Gallo Acosta - Técnicas Digitales III</p>
+      </footer>
+    </div>
+    <script src="/static/js/script.js"></script>
+  </body>
+</html>

@@ -38,8 +38,9 @@ add_executable(firmware firmware.c )
 
 # Configuración adicional de FreeRTOS de la aplicación (si el archivo existe)
 # set(FREERTOS_USER_CONFIG "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "User FreeRTOSConfig path")
-# Habilito uso de memoria dinámica
-# set(FREERTOS_SUPPORT_DYNAMIC_ALLOCATION "ON" CACHE PATH "FreeRTOS dynamic memory implementation support")
+
+# Habilita memoria dinámica para FreeRTOS
+set(FREERTOS_SUPPORT_DYNAMIC_ALLOCATION "ON" CACHE STRING "Enable dynamic memory in FreeRTOS")
 
 # Add external FreeRTOS library
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freertos)

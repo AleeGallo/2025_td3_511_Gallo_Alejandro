@@ -1,0 +1,49 @@
+body {
+    font-family: Arial, sans-serif;
+    background-color: #121212;
+    color: #ffffff;
+    margin: 20px;
+}
+
+h1, h2 {
+    color: #bb86fc;
+}
+
+.params-section, .chart-section, .terminal-section {
+    margin-bottom: 20px;
+    padding: 10px;
+    border: 1px solid #333;
+    border-radius: 8px;
+}
+
+.param {
+    margin: 10px 0;
+}
+
+input, button {
+    margin: 5px;
+    padding: 8px;
+    background-color: #1e1e1e;
+    color: #ffffff;
+    border: 1px solid #555;
+    border-radius: 4px;
+}
+
+button {
+    cursor: pointer;
+    background-color: #bb86fc;
+}
+
+button:hover {
+    background-color: #9c4dcc;
+}
+
+textarea {
+    width: 100%;
+    height: 200px;
+    background-color: #1e1e1e;
+    color: #ffffff;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 10px;
+}
