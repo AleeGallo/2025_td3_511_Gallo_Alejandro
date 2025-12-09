@@ -65,7 +65,7 @@ static size_t egb_serdev_receive(struct serdev_device *serdev, const unsigned ch
 {
     size_t i;
 
-    /* Bloqueamos tx_mutex primero (evita races/leer last_tx seguro), luego rx_mutex */
+    /* Bloqueamos tx_mutex primero (evita races/leer last_tx seguro) y rx_mutex */
     mutex_lock(&tx_mutex);
     mutex_lock(&rx_mutex);
 
@@ -95,7 +95,6 @@ static size_t egb_serdev_receive(struct serdev_device *serdev, const unsigned ch
                     rx_len = 0;
                     /* opcional: resetear last_tx_len si querés evitar dobles coincidencias */
                     last_tx_len = 0;
-                    /* NO wake_up; ignoramos esta línea */
                 } else {
                     /* Línea válida -> pasar a userspace */
                     dev_info(&serdev->dev, "Linea completa recibida por UART: '%s'\n", rx_buffer);
@@ -124,7 +123,6 @@ static const struct serdev_device_ops egb_serdev_ops = {
 
 /* ============================================================
  *         CHAR DEVICE: READ (bloqueante hasta recibir UART)
- *         Versión sin usar *offset, permite múltiples lecturas
  * ============================================================ */
 
 static ssize_t egb_read(struct file *f, char __user *buf, size_t size, loff_t *offset) {
@@ -188,7 +186,7 @@ static ssize_t egb_write(struct file *f, const char __user *buf, size_t size, lo
     if (copy_from_user(tx_buffer, buf, len))
         return -EFAULT;
 
-    /* añadir newline si no existe */
+    /* añadir "\n" si no existe */
     if (len == 0 || (tx_buffer[len-1] != '\n' && tx_buffer[len-1] != '\r')) {
         tx_buffer[len++] = '\n';
         tx_buffer[len] = '\0';
@@ -196,7 +194,7 @@ static ssize_t egb_write(struct file *f, const char __user *buf, size_t size, lo
         tx_buffer[len] = '\0';
     }
 
-    /* Guardar copia trimmeada en last_tx para filtrar eco */
+    /* Guardar copia trimmeada en last_tx para filtrar ECHO */
     mutex_lock(&tx_mutex);
     {
         /* crear copia sin CR/LF al final */
@@ -214,7 +212,7 @@ static ssize_t egb_write(struct file *f, const char __user *buf, size_t size, lo
         }
         last_tx_len = strlen(last_tx);
 
-        /* Enviar */
+        /* Enviar por serdev al UART (Escribe directamente desde WRITE) */
         if (g_serdev) serdev_device_write_buf(g_serdev, tx_buffer, len);
     }
     mutex_unlock(&tx_mutex);
