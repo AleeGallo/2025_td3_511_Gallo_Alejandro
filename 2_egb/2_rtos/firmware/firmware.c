@@ -156,7 +156,8 @@ typedef enum {
     CMD_UNKNOWN
 } cmd_type_t;
 
-pid_params_t pid_params_global = { .Kp = 1.85f, .Ki = 3.4f, .Kd = 0.24f, .Ts = 0.1f };
+pid_params_t pid_params_global = { .Kp = 1.82f, .Ki = 3.42f, .Kd = 0.24f, .Ts = 0.1f };
+//pid_params_t pid_params_global = { .Kp = 1.85f, .Ki = 3.4f, .Kd = 0.24f, .Ts = 0.1f };
 
 /*------------- COLAS Y SEMAFOROS  -------------*/
 
@@ -777,7 +778,7 @@ void task_Control (void *pvParameters) {
                 uart_sendf("R=%d", R_actual);
             }
 
-            // Frecuencia de calculo -> 1ms -> 1KHz
+            // Frecuencia de calculo -> 10ms -> 100Hz
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
