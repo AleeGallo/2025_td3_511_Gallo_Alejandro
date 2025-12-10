@@ -1,1 +1,0 @@
-savedcmd_/home/frankie/workspace/egb/chrdev/egb_chrdev.mod := printf '%s\n'   egb_chrdev.o | awk '!x[$$0]++ { print("/home/frankie/workspace/egb/chrdev/"$$0) }' > /home/frankie/workspace/egb/chrdev/egb_chrdev.mod

@@ -1,1 +1,0 @@
-savedcmd_/home/frankie/workspace/egb/uart_egb_serdev.mod := printf '%s\n'   uart_egb_serdev.o | awk '!x[$$0]++ { print("/home/frankie/workspace/egb/"$$0) }' > /home/frankie/workspace/egb/uart_egb_serdev.mod

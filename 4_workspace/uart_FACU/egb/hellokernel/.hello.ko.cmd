@@ -1,1 +1,0 @@
-savedcmd_/home/frankie/workspace/hellokernel/hello.ko := aarch64-linux-gnu-ld -r -EL  -maarch64elf -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T arch/arm64/module.lds -o /home/frankie/workspace/hellokernel/hello.ko /home/frankie/workspace/hellokernel/hello.o /home/frankie/workspace/hellokernel/hello.mod.o /home/frankie/workspace/hellokernel/.module-common.o

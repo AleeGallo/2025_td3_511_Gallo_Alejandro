@@ -1,1 +1,0 @@
-savedcmd_/home/frankie/workspace/hellokernel/hello.mod := printf '%s\n'   hello.o | awk '!x[$$0]++ { print("/home/frankie/workspace/hellokernel/"$$0) }' > /home/frankie/workspace/hellokernel/hello.mod

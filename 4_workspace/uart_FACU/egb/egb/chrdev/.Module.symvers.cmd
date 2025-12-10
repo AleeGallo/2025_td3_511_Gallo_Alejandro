@@ -1,1 +1,0 @@
-savedcmd_/home/frankie/workspace/egb/chrdev/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /home/frankie/workspace/egb/chrdev/Module.symvers -T /home/frankie/workspace/egb/chrdev/modules.order -i Module.symvers -e 
